@@ -1,0 +1,109 @@
+# Builds Sleet for Windows, macOS and Linux and attaches the installers to a
+# draft GitHub release. Publish the draft to ship it: installed copies of Sleet
+# check the latest published release for updates.
+#
+# Start a release: bump "version" in src-tauri/tauri.conf.json, commit, then
+#   git tag v0.2.0 && git push origin v0.2.0
+# (or run this workflow by hand from the Actions tab).
+#
+# Signed updates need, in Settings → Secrets and variables → Actions:
+#   secret   TAURI_SIGNING_PRIVATE_KEY           contents of your sleet.key
+#   secret   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password (if you set one)
+#   variable TAURI_UPDATER_PUBKEY                contents of sleet.key.pub
+# Without them the installers are still built, just without in-app updates.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            args: ""
+          - name: macOS Apple silicon
+            os: macos-latest
+            target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin
+          - name: macOS Intel
+            os: macos-latest
+            target: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin
+          - name: Linux
+            os: ubuntu-22.04
+            args: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches the app version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          if [ "v$version" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} doesn't match version $version in src-tauri/tauri.conf.json"
+            exit 1
+          fi
+
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libdbus-1-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # rust-toolchain.toml picks the Rust version; add the cross target on macOS.
+      - name: Rust toolchain
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          if [ -n "${{ matrix.target }}" ]; then rustup target add ${{ matrix.target }}; fi
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.target || matrix.os }}
+
+      - run: npm ci
+
+      - name: Turn on signed updates
+        if: vars.TAURI_UPDATER_PUBKEY != ''
+        env:
+          TAURI_UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
+        run: node scripts/configure-updater.mjs "${{ github.repository }}"
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: v__VERSION__
+          releaseName: Sleet v__VERSION__
+          releaseBody: Download the installer for your system below. Sleet already installed? It offers the update in Settings → Advanced.
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
+          # latest.json: what installed copies read to find this release.
+          includeUpdaterJson: ${{ vars.TAURI_UPDATER_PUBKEY != '' }}
+          updaterJsonPreferNsis: true

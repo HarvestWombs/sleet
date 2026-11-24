@@ -1,0 +1,55 @@
+[package]
+name = "sleet"
+version = "0.1.0"
+description = "A focused, lightweight browser"
+authors = ["Sleet contributors"]
+edition = "2021"
+
+[lib]
+name = "sleet_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "3.0.0-alpha.4", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "3.0.0-alpha.6", features = ["unstable"] }
+tauri-runtime-wry = { version = "3.0.0-alpha.6", features = ["unstable"] }
+url = "2"
+rusqlite = { version = "0.37", features = ["bundled"] }
+base64 = "0.23"
+# Password vault (see src/vault.rs): RustCrypto primitives, memory wiping, clipboard, CSV import.
+argon2 = { version = "0.5", features = ["std", "zeroize"] }
+chacha20poly1305 = { version = "0.10", features = ["std"] }
+zeroize = { version = "1.8", features = ["derive", "serde"] }
+arboard = { version = "3", default-features = false }
+csv = "1"
+# Signed in-app updates (switched on only when an update key is configured).
+tauri-plugin-updater = "3.0.0-alpha.3"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+webview2-com = "0.39"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_UI_WindowsAndMessaging"] }
+windows-core = "0.62"
+winreg = "0.56"
+
+# "Remember on this device": the OS secure store on each platform.
+[target.'cfg(target_os = "windows")'.dependencies.keyring]
+version = "3"
+features = ["windows-native"]
+
+[target.'cfg(target_os = "macos")'.dependencies.keyring]
+version = "3"
+features = ["apple-native"]
+
+[target.'cfg(target_os = "linux")'.dependencies.keyring]
+version = "3"
+features = ["sync-secret-service", "crypto-rust"]
+
+# Argon2 is deliberately expensive; unoptimised debug builds would make unlocking take many seconds.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3

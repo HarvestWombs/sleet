@@ -1,0 +1,25 @@
+import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+import App from "./App";
+import { loadKv } from "./lib/kv";
+import { overlayKindFromLocation } from "./lib/overlay";
+import { applyLaunchSettings } from "./lib/settings";
+import { OverlayApp } from "./overlay/OverlayApp";
+import "./styles.css";
+
+const overlayKind = overlayKindFromLocation();
+
+/** Saved state is loaded from SQLite before the first render (overlays don't need it). */
+async function start() {
+  if (!overlayKind) {
+    await loadKv();
+    applyLaunchSettings();
+  }
+  createRoot(document.getElementById("root")!).render(
+    <StrictMode>
+      {overlayKind ? <OverlayApp kind={overlayKind} /> : <App />}
+    </StrictMode>,
+  );
+}
+
+void start();
