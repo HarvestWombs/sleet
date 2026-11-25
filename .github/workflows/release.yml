@@ -36,14 +36,16 @@ jobs:
           - name: Windows
             os: windows-latest
             args: ""
-          - name: macOS Apple silicon
-            os: macos-latest
-            target: aarch64-apple-darwin
-            args: --target aarch64-apple-darwin
-          - name: macOS Intel
-            os: macos-latest
-            target: x86_64-apple-darwin
-            args: --target x86_64-apple-darwin
+          # macOS builds are off for now (GitHub's macOS runners often wait
+          # in a queue for a long time). To bring them back, add:
+          #   - name: macOS Apple silicon
+          #     os: macos-latest
+          #     target: aarch64-apple-darwin
+          #     args: --target aarch64-apple-darwin
+          #   - name: macOS Intel
+          #     os: macos-latest
+          #     target: x86_64-apple-darwin
+          #     args: --target x86_64-apple-darwin
           - name: Linux
             os: ubuntu-22.04
             args: ""

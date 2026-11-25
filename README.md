@@ -111,7 +111,7 @@ On macOS, use `Cmd` in place of `Ctrl`.
 
 ## Platforms
 
-Sleet is developed on **Windows**, where every feature works. Builds for macOS and Linux are produced too, but a few features are Windows-only for now: pausing downloads, password-form detection and some engine hooks (crash reporting, the download warnings). Contributions for the other platforms are welcome.
+Sleet is developed on **Windows**, where every feature works. Releases include Linux builds too, but a few features are Windows-only for now: pausing downloads, password-form detection and some engine hooks (crash reporting, the download warnings). macOS builds from source but has no release builds yet. Contributions for the other platforms are welcome.
 
 ## Building from source
 
@@ -142,8 +142,8 @@ npm run tauri build    # installers in src-tauri/target/release/bundle
 
 GitHub Actions builds everything.
 
-- **CI** (`ci.yml`): every push and pull request runs the type check, frontend tests and Rust tests on Windows, macOS and Linux.
-- **Release** (`release.yml`): pushing a `v*` tag builds installers for every platform and attaches them to a **draft** release. Publishing the draft ships it, and installed copies offer the update in Settings → Advanced.
+- **CI** (`ci.yml`): every push and pull request runs the type check, frontend tests and Rust tests on Windows and Linux.
+- **Release** (`release.yml`): pushing a `v*` tag builds Windows and Linux installers and attaches them to a **draft** release. Publishing the draft ships it, and installed copies offer the update in Settings → Advanced.
 
 To release, bump `version` in `src-tauri/tauri.conf.json` (the tag must match it), commit, then:
 
