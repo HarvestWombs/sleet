@@ -8,6 +8,8 @@ export interface BrowserTab {
   createdAt: number;
   /** Page zoom chosen for this tab; falls back to the default zoom setting. */
   zoom?: number;
+  /** The tab group it belongs to (lib/tabGroups.ts). */
+  groupId?: string;
   /**
    * Addresses visited in this tab, kept by Sleet so back/forward still work
    * after the tab's page is unloaded (or Sleet restarts).
@@ -49,15 +51,18 @@ export interface DownloadItem {
   startedAt: number;
   received?: number;
   total?: number;
-  /** Why a failed download failed, in plain words. */
+  /** Why a failed download failed (or a paused one stopped), in plain words. */
   error?: string;
+  /** An active download that is paused (by the user, or by a network error it can resume from). */
+  paused?: boolean;
 }
 
-/** How a download ended, keyed by the address it started from. */
+/** A download changed state, keyed by the address it started from. */
 export interface DownloadStateEvent {
   label: string;
   url: string;
-  state: "complete" | "cancelled" | "failed";
+  /** `discarded`: the Save as dialog was closed, so nothing was downloaded. */
+  state: "complete" | "cancelled" | "failed" | "discarded" | "paused" | "active";
   path?: string | null;
   reason?: string | null;
 }
@@ -150,4 +155,6 @@ export interface HttpsFailedEvent {
 export interface FaviconEvent {
   label: string;
   icon?: string | null;
+  /** The site's large icon (found by Sleet), rather than the engine's 16px one. */
+  sharp?: boolean;
 }

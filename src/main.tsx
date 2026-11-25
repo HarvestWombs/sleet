@@ -3,7 +3,8 @@ import { createRoot } from "react-dom/client";
 import App from "./App";
 import { loadKv } from "./lib/kv";
 import { overlayKindFromLocation } from "./lib/overlay";
-import { applyLaunchSettings } from "./lib/settings";
+import { applyLaunchSettings, readSettings } from "./lib/settings";
+import { IS_MAIN_WINDOW, prepareSavedWindows, takeWindowStart } from "./lib/windows";
 import { OverlayApp } from "./overlay/OverlayApp";
 import "./styles.css";
 
@@ -13,7 +14,13 @@ const overlayKind = overlayKindFromLocation();
 async function start() {
   if (!overlayKind) {
     await loadKv();
-    applyLaunchSettings();
+    if (IS_MAIN_WINDOW) {
+      // Launch-time work happens once, in the first window.
+      applyLaunchSettings();
+      prepareSavedWindows(readSettings().startup === "restore");
+    } else {
+      await takeWindowStart();
+    }
   }
   createRoot(document.getElementById("root")!).render(
     <StrictMode>

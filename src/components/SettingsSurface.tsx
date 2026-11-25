@@ -68,7 +68,7 @@ function PermissionsPage() {
                     </button>
                   ))}
                 </div>
-                <button className="icon-remove" aria-label={`Forget ${permissionName(row.kind)} for ${hostOf(origin)}`} onClick={() => void permissionDelete(origin, row.kind).then(load)}><X size={13} /></button>
+                <button className="icon-remove" aria-label={`Forget ${permissionName(row.kind)} for ${hostOf(origin)}`} onClick={() => void permissionDelete(origin, row.kind).then(load)}><X size={16} /></button>
               </div>
             </div>
           ))}
@@ -162,7 +162,7 @@ function ClearDataModal({ onCancel, onClear }: { onCancel: () => void; onClear: 
         {error && <p className="modal-error">Could not clear: {error}</p>}
         <footer className="modal-actions">
           <button className="settings-button" onClick={onCancel}>Cancel</button>
-          <button className="settings-button is-primary-danger" disabled={nothing || busy} onClick={() => void run()}><Trash2 size={13} /> {busy ? "Clearing…" : "Clear data"}</button>
+          <button className="settings-button is-primary-danger" disabled={nothing || busy} onClick={() => void run()}><Trash2 size={16} /> {busy ? "Clearing…" : "Clear data"}</button>
         </footer>
       </section>
     </div>
@@ -346,6 +346,21 @@ export function SettingsSurface({ settings, section, downloadDirError, onChange,
       section: "downloads", label: "Download location", detail: downloadDirError ?? "Full path to an existing folder. Leave empty for the system default.", keywords: "folder path save",
       control: <CommitInput label="Download location" value={settings.downloadDir} onCommit={set("downloadDir")} placeholder="System default" />,
     },
+    { section: "downloads", label: "Ask where to save each file", detail: "Choose a folder and name for every download", keywords: "save as dialog location prompt", control: <Toggle label="Ask where to save each file" checked={settings.downloadAsk} onChange={set("downloadAsk")} /> },
+    {
+      section: "downloads", label: "Open automatically",
+      detail: settings.autoOpenTypes.length ? "These file types open as soon as they finish downloading" : "None yet. Right-click a download and choose “Always open” to add its file type. Programs and scripts are never opened automatically.",
+      keywords: "always open file type extension auto",
+      control: settings.autoOpenTypes.length > 0 && (
+        <span className="settings-chips">
+          {settings.autoOpenTypes.map((extension) => (
+            <button key={extension} type="button" className="settings-chip" title={`Stop opening .${extension} files automatically`} onClick={() => onChange({ autoOpenTypes: settings.autoOpenTypes.filter((item) => item !== extension) })}>
+              .{extension} <X size={13} />
+            </button>
+          ))}
+        </span>
+      ),
+    },
     { section: "downloads", label: "Download notifications", detail: "Show a small notice with progress in the upper left", keywords: "toast progress", control: <Toggle label="Download notifications" checked={settings.downloadToasts} onChange={set("downloadToasts")} /> },
     {
       section: "downloads", label: "Notification time", detail: "How long a notice stays after its download finishes", keywords: "toast seconds",
@@ -387,11 +402,25 @@ export function SettingsSurface({ settings, section, downloadDirError, onChange,
     { section: "bookmarks", label: "Bookmarks in Sleet", detail: `${allLinks(bookmarks).length} bookmarks in ${bookmarks.filter((node) => node.kind === "folder").length} folders`, keywords: "remove delete all bookmarks", control: <ConfirmButton onConfirm={onRemoveAllBookmarks}>Remove all</ConfirmButton> },
     { section: "security", label: "Passwords", detail: "Saved passwords, master password, import and export", keywords: "password vault login master autofill", control: <button className="settings-button" onClick={() => { setQuery(""); setCategory("passwords"); }}>Open</button> },
     { section: "security", label: "Harmful downloads", detail: "Windows checks installers and other risky files; Sleet asks before keeping one it flags", keywords: "smartscreen exe download virus", control: <span className="settings-value">Always on</span> },
+    {
+      section: "security", label: "Kept without asking",
+      detail: settings.trustedDownloadTypes.length ? "Flagged files of these types are kept without asking. Click one to be asked again." : "None. Tick “Always keep” on a download warning to add its file type.",
+      keywords: "harmful download keep trust file type exe always",
+      control: settings.trustedDownloadTypes.length > 0 && (
+        <span className="settings-chips">
+          {settings.trustedDownloadTypes.map((extension) => (
+            <button key={extension} type="button" className="settings-chip" title={`Ask again before keeping .${extension} files`} onClick={() => onChange({ trustedDownloadTypes: settings.trustedDownloadTypes.filter((item) => item !== extension) })}>
+              .{extension} <X size={13} />
+            </button>
+          ))}
+        </span>
+      ),
+    },
     { section: "privacy", label: "Keep history", keywords: "retention forever days session disabled", control: <Segmented label="Keep history" value={settings.historyRetention} onChange={set("historyRetention")} options={[["forever", "Forever"], ["30-days", "30 days"], ["session", "This session"], ["disabled", "Off"]]} /> },
     {
       section: "privacy", label: "Clear browsing data", keywords: "cookies cache storage delete",
       detail: clearStatus ?? "History, downloads, cookies, cache and more, for a time range.",
-      control: <button className="settings-button is-danger" onClick={() => { setClearStatus(null); setClearOpen(true); }}><Trash2 size={13} /> Clear data…</button>,
+      control: <button className="settings-button is-danger" onClick={() => { setClearStatus(null); setClearOpen(true); }}><Trash2 size={16} /> Clear data…</button>,
     },
 
     { section: "privacy", label: "Clear history when Sleet closes", keywords: "exit quit", control: <Toggle label="Clear history when Sleet closes" checked={settings.clearHistoryOnExit} onChange={set("clearHistoryOnExit")} /> },
@@ -415,7 +444,7 @@ export function SettingsSurface({ settings, section, downloadDirError, onChange,
       <div className="settings-layout">
         <nav className="settings-nav" aria-label="Settings categories">
           <label className="settings-search">
-            <Search size={14} />
+            <Search size={18} />
             <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search settings" aria-label="Search settings" />
           </label>
           <span className="settings-nav-label">Settings</span>
@@ -480,7 +509,7 @@ export function SettingsSurface({ settings, section, downloadDirError, onChange,
               </section>
             );
           })}
-          {visible.length === 0 && <div className="empty-state"><Search size={27} /><strong>No matching settings</strong></div>}
+          {visible.length === 0 && <div className="empty-state"><Search size={34} /><strong>No matching settings</strong></div>}
         </div>
       </div>
       {clearOpen && (

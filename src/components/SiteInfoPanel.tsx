@@ -47,7 +47,7 @@ export function SiteInfoPanel({ info, variant = "inline", onSetPermission, onCle
   return (
     <section className={`site-info ${variant === "overlay" ? "is-overlay" : ""}`} role="dialog" aria-label={`Site information for ${info.host}`}>
       <header className={`site-info-status is-${info.security}`}>
-        <Icon size={16} />
+        <Icon size={20} />
         <span>
           <strong>{info.host || "Sleet"}</strong>
           <small>{status.title}</small>
@@ -58,7 +58,7 @@ export function SiteInfoPanel({ info, variant = "inline", onSetPermission, onCle
         <button className="site-info-danger" onClick={onAllowCertificate}>Continue to this site anyway (unsafe)</button>
       )}
       {info.private && (
-        <p className="site-info-note"><VenetianMask size={13} /> Private tab: nothing from this site is kept after your private tabs close.</p>
+        <p className="site-info-note"><VenetianMask size={16} /> Private tab: nothing from this site is kept after your private tabs close.</p>
       )}
 
       {isWebSite && (
@@ -101,7 +101,7 @@ export function SiteInfoPanel({ info, variant = "inline", onSetPermission, onCle
               onClearSite();
             }}
           >
-            <Trash2 size={13} /> {cleared ? "Cleared, page reloaded" : confirmClear ? "Click again to sign out and clear" : "Clear cookies and site data"}
+            <Trash2 size={16} /> {cleared ? "Cleared, page reloaded" : confirmClear ? "Click again to sign out and clear" : "Clear cookies and site data"}
           </button>
         </>
       )}

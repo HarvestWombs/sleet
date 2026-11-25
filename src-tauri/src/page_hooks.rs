@@ -38,19 +38,20 @@ mod imp {
     use super::{AudioState, ContextAction, FaviconChange, UrlChange};
     use base64::Engine;
     use std::{sync::mpsc, time::Duration};
-    use tauri::{AppHandle, Emitter, Webview};
+    use tauri::{AppHandle, Emitter, Manager, Webview};
     use webview2_com::{
         take_pwstr, ContextMenuRequestedEventHandler, CustomItemSelectedEventHandler,
         IsDocumentPlayingAudioChangedEventHandler, IsMutedChangedEventHandler,
         SourceChangedEventHandler, FaviconChangedEventHandler, GetFaviconCompletedHandler,
-        WebMessageReceivedEventHandler, ProcessFailedEventHandler,
+        WebMessageReceivedEventHandler, ProcessFailedEventHandler, HistoryChangedEventHandler,
         Microsoft::Web::WebView2::Win32::{
             COREWEBVIEW2_PROCESS_FAILED_KIND, COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
             COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE,
             COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED,
             ICoreWebView2, ICoreWebView2ContextMenuItem, ICoreWebView2ContextMenuItemCollection,
             ICoreWebView2Environment9, ICoreWebView2_11, ICoreWebView2_15, ICoreWebView2_8, ICoreWebView2_9,
-            ICoreWebView2Settings4,
+            ICoreWebView2Settings4, ICoreWebView2_19,
+            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
             COREWEBVIEW2_FAVICON_IMAGE_FORMAT_PNG,
             COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND, COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND,
             COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SEPARATOR,
@@ -234,6 +235,34 @@ mod imp {
                 }));
                 unsafe { core.add_SourceChanged(&url_handler, &mut url_token)? };
 
+                // Whether the page's own history can go back/forward (greys out the buttons).
+                let history_app = app.clone();
+                let history_label = label.clone();
+                let mut history_token = 0i64;
+                let history_handler = HistoryChangedEventHandler::create(Box::new(move |sender, _| {
+                    let Some(sender) = sender else { return Ok(()) };
+                    let (mut back, mut forward) = (BOOL::default(), BOOL::default());
+                    unsafe {
+                        sender.CanGoBack(&mut back)?;
+                        sender.CanGoForward(&mut forward)?;
+                    }
+                    let _ = history_app.emit("sleet-history", serde_json::json!({ "label": history_label, "back": back.as_bool(), "forward": forward.as_bool() }));
+                    Ok(())
+                }));
+                unsafe { core.add_HistoryChanged(&history_handler, &mut history_token)? };
+
+                // Focus moved into this page (a click in a docked pane makes it the active tab).
+                if let Some(wry_webview) = platform.downcast_ref::<tauri_runtime_wry::Webview>() {
+                    let focus_app = app.clone();
+                    let focus_label = label.clone();
+                    let mut focus_token = 0i64;
+                    let focus_handler = webview2_com::FocusChangedEventHandler::create(Box::new(move |_, _| {
+                        let _ = focus_app.emit("sleet-page-focus", serde_json::json!({ "label": focus_label }));
+                        Ok(())
+                    }));
+                    unsafe { wry_webview.controller().add_GotFocus(&focus_handler, &mut focus_token)? };
+                }
+
                 // Favicon: sent as a PNG data URL, so the chrome never fetches it itself.
                 if let Ok(icons) = core.cast::<ICoreWebView2_15>() {
                     let icon_app = app.clone();
@@ -245,9 +274,14 @@ mod imp {
                         let app = icon_app.clone();
                         let label = icon_label.clone();
                         let done = GetFaviconCompletedHandler::create(Box::new(move |result, stream| {
-                            let icon = result.ok().and(stream).and_then(|stream| unsafe { read_stream(&stream) }.ok())
+                            // A large icon already found for this site wins over the engine's 16px one.
+                            let sharp = app.get_webview(&label)
+                                .and_then(|webview| webview.url().ok())
+                                .and_then(|url| crate::vault::origin_of(url.as_str()))
+                                .and_then(|origin| crate::favicons::cached(&origin));
+                            let icon = sharp.or_else(|| result.ok().and(stream).and_then(|stream| unsafe { read_stream(&stream) }.ok())
                                 .filter(|bytes| !bytes.is_empty())
-                                .map(|bytes| format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)));
+                                .map(|bytes| format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes))));
                             let _ = app.emit("sleet-favicon", FaviconChange { label, icon });
                             Ok(())
                         }));
@@ -375,6 +409,17 @@ mod imp {
             .map_err(|error| error.to_string())
     }
 
+    /// Background tabs ask the engine to use less memory (it trims caches and
+    /// may compress or page out memory); the tab in front goes back to normal.
+    pub fn set_low_memory(webview: &Webview, low: bool) {
+        let _ = webview.with_webview(move |platform| {
+            let level = if low { COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW } else { COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL };
+            let _ = parts(&platform)
+                .and_then(|(core, _)| core.cast::<ICoreWebView2_19>())
+                .and_then(|core| unsafe { core.SetMemoryUsageTargetLevel(level) });
+        });
+    }
+
     pub fn set_muted(webview: &Webview, muted: bool) -> Result<(), String> {
         webview
             .with_webview(move |platform| {
@@ -403,6 +448,8 @@ mod imp {
 
     pub fn raise(_webview: &Webview) {}
 
+    pub fn set_low_memory(_webview: &Webview, _low: bool) {}
+
     pub fn open_download_panel(_webview: &Webview) -> Result<(), String> {
         Err("the download panel is only available on Windows".into())
     }
@@ -422,6 +469,10 @@ pub async fn step_history(webview: &Webview, back: bool) -> Result<bool, String>
 
 pub fn raise(webview: &Webview) {
     imp::raise(webview)
+}
+
+pub fn set_low_memory(webview: &Webview, low: bool) {
+    imp::set_low_memory(webview, low)
 }
 
 pub fn open_download_panel(webview: &Webview) -> Result<(), String> {

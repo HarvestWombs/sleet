@@ -1,9 +1,11 @@
-import { AlertCircle, CheckCircle2, Clock3, Download, ExternalLink, FolderOpen, History, Search, Trash2, X } from "lucide-react";
+import { AlertCircle, CheckCircle2, Clock3, Download, ExternalLink, FolderOpen, History, Pause, Play, Search, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
+import { canPauseDownloads } from "../lib/downloadTypes";
 import { historyList } from "../native/store";
 import type { DownloadItem, HistoryEntry, Surface } from "../types";
 import type { MenuEntry } from "./ContextMenu";
 import { downloadStatusText } from "./Toasts";
+import { DownloadBar } from "./DownloadIcon";
 import { SiteIcon } from "./SiteIcon";
 
 interface LibrarySurfaceProps {
@@ -16,6 +18,7 @@ interface LibrarySurfaceProps {
   onOpenDownload: (download: DownloadItem) => void;
   onRevealDownload: (download: DownloadItem) => void;
   onCancelDownload: (download: DownloadItem) => void;
+  onPauseDownload: (download: DownloadItem) => void;
   onOpenFolder: () => void;
   onClearDownloads: () => void;
   onContextMenu: (x: number, y: number, items: MenuEntry[]) => void;
@@ -45,10 +48,10 @@ function HistoryPage({ historyVersion, onOpen, onClearHistory, onContextMenu, hi
           <h2>History</h2>
           <p>Kept locally on this device.</p>
         </div>
-        {items.length > 0 && <button className="quiet-button" onClick={onClearHistory}><Trash2 size={15} /> Clear all</button>}
+        {items.length > 0 && <button className="quiet-button" onClick={onClearHistory}><Trash2 size={19} /> Clear all</button>}
       </header>
       <label className="settings-search">
-        <Search size={15} />
+        <Search size={19} />
         <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search history" aria-label="Search history" />
       </label>
       <div className="library-list">
@@ -57,12 +60,12 @@ function HistoryPage({ historyVersion, onOpen, onClearHistory, onContextMenu, hi
             <span className="library-icon"><SiteIcon url={item.url} title={item.title} className="library-site-icon" /></span>
             <span className="library-copy"><strong>{item.title}</strong><small>{item.url}</small></span>
             <time>{formatter.format(item.visitedAt)}</time>
-            <ExternalLink size={15} />
+            <ExternalLink size={19} />
           </button>
         ))}
         {items.length === 0 && (
           <div className="empty-state">
-            <History size={27} />
+            <History size={34} />
             <strong>{query ? "No matches" : "Nothing here yet"}</strong>
             <p>{query ? "Try a different search." : "Pages you visit will appear here."}</p>
           </div>
@@ -72,7 +75,7 @@ function HistoryPage({ historyVersion, onOpen, onClearHistory, onContextMenu, hi
   );
 }
 
-function DownloadsPage({ downloads, onOpenDownload, onRevealDownload, onCancelDownload, onOpenFolder, onClearDownloads, onContextMenu, downloadMenu }: Pick<LibrarySurfaceProps, "downloads" | "onOpenDownload" | "onRevealDownload" | "onCancelDownload" | "onOpenFolder" | "onClearDownloads" | "onContextMenu" | "downloadMenu">) {
+function DownloadsPage({ downloads, onOpenDownload, onRevealDownload, onCancelDownload, onPauseDownload, onOpenFolder, onClearDownloads, onContextMenu, downloadMenu }: Pick<LibrarySurfaceProps, "downloads" | "onOpenDownload" | "onRevealDownload" | "onCancelDownload" | "onPauseDownload" |"onOpenFolder" | "onClearDownloads" | "onContextMenu" | "downloadMenu">) {
   return (
     <>
       <header className="library-header">
@@ -82,8 +85,8 @@ function DownloadsPage({ downloads, onOpenDownload, onRevealDownload, onCancelDo
           <p>Click a finished download to open it.</p>
         </div>
         <div className="library-actions">
-          {downloads.length > 0 && <button className="quiet-button" onClick={onClearDownloads}><Trash2 size={15} /> Clear list</button>}
-          <button className="quiet-button" onClick={onOpenFolder}><FolderOpen size={15} /> Open folder</button>
+          {downloads.length > 0 && <button className="quiet-button" onClick={onClearDownloads}><Trash2 size={19} /> Clear list</button>}
+          <button className="quiet-button" onClick={onOpenFolder}><FolderOpen size={19} /> Open folder</button>
         </div>
       </header>
       <div className="library-list">
@@ -91,23 +94,31 @@ function DownloadsPage({ downloads, onOpenDownload, onRevealDownload, onCancelDo
           return (
             <div className="library-row download-row" key={item.id} onContextMenu={(event) => { event.preventDefault(); onContextMenu(event.clientX, event.clientY, downloadMenu(item)); }}>
               <button className="download-open" onClick={() => onOpenDownload(item)} disabled={item.status !== "complete"} title={item.status === "complete" ? "Open file" : undefined}>
-                <span className="library-icon"><Download size={18} /></span>
+                <span className="library-icon"><Download size={23} /></span>
                 <span className="library-copy">
                   <strong>{item.filename}</strong>
+                  <DownloadBar download={item} />
                   <small>{item.status === "complete" ? item.path ?? item.url : downloadStatusText(item)}</small>
                 </span>
               </button>
               <time>{formatter.format(item.startedAt)}</time>
-              {item.status === "active"
-                ? <button className="quiet-button" onClick={() => onCancelDownload(item)}><X size={14} /> Cancel</button>
-                : <button className="quiet-button" onClick={() => onRevealDownload(item)} disabled={item.status !== "complete"}><FolderOpen size={14} /> Show in folder</button>}
-              {item.status === "complete" ? <CheckCircle2 className="success" size={17} /> : item.status === "failed" ? <AlertCircle className="failure" size={17} /> : <Clock3 size={17} />}
+              <span className="download-buttons">
+                {item.status === "active" && canPauseDownloads && (
+                  <button className="toast-button" aria-label={item.paused ? `Resume ${item.filename}` : `Pause ${item.filename}`} title={item.paused ? "Resume download" : "Pause download"} onClick={() => onPauseDownload(item)}>
+                    {item.paused ? <Play size={17} /> : <Pause size={17} />}
+                  </button>
+                )}
+                {item.status === "active"
+                  ? <button className="toast-button" aria-label={`Cancel ${item.filename}`} title="Cancel download" onClick={() => onCancelDownload(item)}><X size={17} /></button>
+                  : <button className="toast-button" aria-label={`Show ${item.filename} in folder`} title="Show in folder" onClick={() => onRevealDownload(item)} disabled={item.status !== "complete"}><FolderOpen size={17} /></button>}
+              </span>
+              {item.status === "complete" ? <CheckCircle2 className="success" size={21} /> : item.status === "failed" ? <AlertCircle className="failure" size={21} /> : item.paused ? <Pause size={21} /> : <Clock3 size={21} />}
             </div>
           );
         })}
         {downloads.length === 0 && (
           <div className="empty-state">
-            <Download size={27} />
+            <Download size={34} />
             <strong>Nothing here yet</strong>
             <p>Your downloaded files will appear here.</p>
           </div>

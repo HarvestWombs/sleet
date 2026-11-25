@@ -9,7 +9,7 @@ use std::{
     sync::Mutex,
     time::Duration,
 };
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 
 /// Links Sleet was started with, handed to the UI once it is ready.
 #[derive(Default)]
@@ -76,12 +76,12 @@ pub fn listen_for_other_launches(app: AppHandle) {
                 .map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_string)).collect())
                 .unwrap_or_default();
             let urls = urls_from_args(urls.into_iter());
-            if let Some(window) = app.get_window("main") {
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-            }
+            // Links from other apps open in the Sleet window used last.
+            let Some(window) = crate::windows::focused_window(&app) else { continue };
+            let _ = window.unminimize();
+            let _ = window.set_focus();
             if !urls.is_empty() {
-                let _ = app.emit("sleet-open-urls", urls);
+                let _ = app.emit("sleet-open-urls", serde_json::json!({ "window": window.label(), "urls": urls }));
             }
         }
     });
@@ -148,11 +148,17 @@ mod imp {
     /// Opens Windows' default apps page for Sleet (Windows 11 deep link;
     /// Windows 10 shows the general default apps page).
     pub fn open_settings() -> Result<(), String> {
-        std::process::Command::new("explorer")
-            .arg("ms-settings:defaultapps?registeredAppUser=Sleet")
-            .spawn()
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+        // Windows 10 doesn't understand the per-app query: handed to `explorer`
+        // it opened File Explorer instead of Settings. Windows 11 is build 22000+.
+        let build: u32 = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+            .open_subkey(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
+            .and_then(|key| key.get_value::<String, _>("CurrentBuildNumber"))
+            .ok()
+            .and_then(|build| build.trim().parse().ok())
+            .unwrap_or(0);
+        let page = if build >= 22000 { "ms-settings:defaultapps?registeredAppUser=Sleet" } else { "ms-settings:defaultapps" };
+        // The URL handler opens ms-settings: links in Settings (no shell involved).
+        crate::native::open_url(page)
     }
 }
 

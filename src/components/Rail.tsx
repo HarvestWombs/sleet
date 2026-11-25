@@ -15,21 +15,21 @@ export function Rail({ surface, onSurfaceChange }: RailProps) {
       </button>
       <div className="rail-group">
         <IconButton label="Tabs" active={surface === "browser"} onClick={() => onSurfaceChange("browser")}>
-          <PanelLeft size={19} />
+          <PanelLeft size={24} />
         </IconButton>
         <IconButton label="History" active={surface === "history"} onClick={() => onSurfaceChange("history")}>
-          <History size={19} />
+          <History size={24} />
         </IconButton>
         <IconButton label="Downloads" active={surface === "downloads"} onClick={() => onSurfaceChange("downloads")}>
-          <Download size={19} />
+          <Download size={24} />
         </IconButton>
       </div>
       <div className="rail-bottom">
         <IconButton label="Reader mode" disabled>
-          <BookOpen size={19} />
+          <BookOpen size={24} />
         </IconButton>
         <IconButton label="Settings" disabled>
-          <Settings2 size={19} />
+          <Settings2 size={24} />
         </IconButton>
       </div>
     </nav>

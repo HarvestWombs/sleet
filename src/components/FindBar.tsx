@@ -23,7 +23,7 @@ export function FindBar({ query, result, focusSignal, onQuery, onStep, onClose }
   const count = !query ? "" : result.count === 0 ? "No matches" : `${result.index + 1} of ${result.count}${result.count >= 5000 ? "+" : ""}`;
   return (
     <div className="find-bar" role="search">
-      <Search size={14} className="find-icon" />
+      <Search size={18} className="find-icon" />
       <input
         ref={input}
         value={query}
@@ -39,9 +39,9 @@ export function FindBar({ query, result, focusSignal, onQuery, onStep, onClose }
         }}
       />
       <span className="find-count" aria-live="polite">{count}</span>
-      <IconButton label="Previous match (Shift+Enter)" onClick={() => onStep(true)} disabled={!result.count}><ChevronUp size={16} /></IconButton>
-      <IconButton label="Next match (Enter)" onClick={() => onStep(false)} disabled={!result.count}><ChevronDown size={16} /></IconButton>
-      <IconButton label="Close (Esc)" onClick={onClose}><X size={15} /></IconButton>
+      <IconButton label="Previous match (Shift+Enter)" onClick={() => onStep(true)} disabled={!result.count}><ChevronUp size={20} /></IconButton>
+      <IconButton label="Next match (Enter)" onClick={() => onStep(false)} disabled={!result.count}><ChevronDown size={20} /></IconButton>
+      <IconButton label="Close (Esc)" onClick={onClose}><X size={19} /></IconButton>
     </div>
   );
 }

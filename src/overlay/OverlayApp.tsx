@@ -3,6 +3,8 @@ import { SiteInfoPanel } from "../components/SiteInfoPanel";
 import { LoginsMenu } from "../components/LoginsMenu";
 import { SuggestionList } from "../components/SuggestionList";
 import { Toasts } from "../components/Toasts";
+import { PromptModal } from "../components/PromptModal";
+import { ContextMenu } from "../components/ContextMenu";
 import { applyVars } from "../lib/appearance";
 import { OVERLAY_EVENTS, type OverlayAction, type OverlayKind, type OverlayState } from "../lib/overlay";
 import { emitEvent, listenEvent } from "../native/browserEngine";
@@ -66,6 +68,20 @@ export function OverlayApp({ kind }: { kind: OverlayKind }) {
   const session = state?.kind === "siteinfo" ? state.session : 0;
   const closeSelf = (refocusPage: boolean) => send({ kind: "siteinfo", type: "close", refocusPage });
   useEffect(() => { if (paletteOpen) openedAt.current = Date.now(); }, [paletteOpen, session]);
+
+  // A menu closes when Sleet loses focus (another app came forward).
+  const menuOpen = state?.kind === "menu" && !!state.menu;
+  useEffect(() => {
+    if (kind !== "menu" || !menuOpen) return;
+    const openedMenuAt = Date.now();
+    let timer: number | undefined;
+    const onBlur = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => { if (!document.hasFocus() && Date.now() - openedMenuAt > 400) send({ kind: "menu", type: "close" }); }, 150);
+    };
+    window.addEventListener("blur", onBlur);
+    return () => { window.clearTimeout(timer); window.removeEventListener("blur", onBlur); };
+  }, [kind, menuOpen]);
   useEffect(() => {
     if (kind !== "siteinfo" || !paletteOpen) return;
     let timer: number | undefined;
@@ -119,6 +135,21 @@ export function OverlayApp({ kind }: { kind: OverlayKind }) {
           onHover={(index) => send({ kind: "suggest", type: "hover", index })}
         />
       )}
+      {state?.kind === "menu" && (
+        <ContextMenu
+          menu={state.menu}
+          onPick={(id) => send({ kind: "menu", type: "pick", id })}
+          onClose={() => send({ kind: "menu", type: "close" })}
+        />
+      )}
+      {state?.kind === "modal" && state.toast && (
+        <PromptModal
+          variant="overlay"
+          toast={state.toast}
+          onChoice={(toast, choice) => send({ kind: "toasts", type: "prompt", toast, choice })}
+          onDismiss={(id) => send({ kind: "toasts", type: "dismiss", id })}
+        />
+      )}
       {state?.kind === "toasts" && (
         <Toasts
           variant="overlay"
@@ -127,7 +158,9 @@ export function OverlayApp({ kind }: { kind: OverlayKind }) {
           onDismiss={(id) => send({ kind: "toasts", type: "dismiss", id })}
           onOpenDownload={(download) => send({ kind: "toasts", type: "open-download", id: download.id })}
           onCancelDownload={(download) => send({ kind: "toasts", type: "cancel-download", id: download.id })}
-          onResolveCheck={(check, keep) => send({ kind: "toasts", type: "resolve-check", check, keep })}
+          onPauseDownload={(download) => send({ kind: "toasts", type: "pause-download", id: download.id })}
+          onShowDownloads={() => send({ kind: "toasts", type: "show-downloads" })}
+          onResolveCheck={(check, keep, remember) => send({ kind: "toasts", type: "resolve-check", check, keep, remember })}
           onPromptChoice={(toast, choice) => send({ kind: "toasts", type: "prompt", toast, choice })}
           onHover={(id, hovering) => send({ kind: "toasts", type: "hover", id, hovering })}
         />

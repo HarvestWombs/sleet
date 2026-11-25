@@ -17,6 +17,7 @@ import type {
   TitleEvent,
   ViewBounds,
 } from "../types";
+import { WINDOW_LABEL, type WindowStart } from "../lib/windows";
 
 export const isTauri = () => "__TAURI_INTERNALS__" in window;
 export const viewLabel = (tabId: string) => `page-${tabId}`;
@@ -50,12 +51,17 @@ export async function navigateView(tabId: string, url: string) {
   await invoke("navigate_browser_view", { label: viewLabel(tabId), url });
 }
 
+/** Tabs docked beside the active one: shown along with it (lib/dock.ts). */
+let dockedVisible: string[] = [];
+export function setDockedVisible(tabIds: string[]) { dockedVisible = tabIds; }
+
 export async function activateView(tabId: string | null, tabIds: string[], focus = false) {
   if (!isTauri()) return;
   await invoke("activate_browser_view", {
     activeLabel: tabId ? viewLabel(tabId) : null,
     labels: tabIds.map(viewLabel),
     focus,
+    alsoVisible: tabId ? dockedVisible.filter((id) => id !== tabId).map(viewLabel) : [],
   });
 }
 
@@ -103,9 +109,23 @@ export async function stepHistory(tabId: string, back: boolean): Promise<boolean
   try { return await invoke<boolean>("step_history", { label: viewLabel(tabId), back }); } catch { return false; }
 }
 
+/**
+ * Overlays used now and then. Each overlay is its own engine process (~40 MB),
+ * so these are created when first shown and closed after a while unused.
+ * The frequent ones (toasts, suggestions, tooltips) stay ready so they appear instantly.
+ */
+const RARE_OVERLAYS = new Set(["overlay-siteinfo", "overlay-logins", "overlay-modal"]);
+const RELEASE_AFTER_MS = 30_000;
+const releaseTimers = new Map<string, number>();
+const keepOverlay = (label: string) => {
+  window.clearTimeout(releaseTimers.get(label));
+  releaseTimers.delete(label);
+};
+
 /** Shows (creating on first use) an overlay webview drawn above page webviews. */
 export async function overlayShow(label: string, kind: string, bounds: ViewBounds, focus: boolean, zoom: number) {
   if (!isTauri()) return;
+  keepOverlay(label);
   await invoke("overlay_show", { label, kind, bounds, focus, zoom }).catch(() => undefined);
 }
 
@@ -117,6 +137,13 @@ export async function overlayPlace(label: string, bounds: ViewBounds) {
 
 export async function overlayHide(label: string) {
   if (!isTauri()) return;
+  if (RARE_OVERLAYS.has(label)) {
+    keepOverlay(label);
+    releaseTimers.set(label, window.setTimeout(() => {
+      releaseTimers.delete(label);
+      void invoke("overlay_release", { label }).catch(() => undefined);
+    }, RELEASE_AFTER_MS));
+  }
   await invoke("overlay_hide", { label }).catch(() => undefined);
 }
 
@@ -142,6 +169,18 @@ export async function setViewMuted(tabId: string, muted: boolean) {
 export async function setChromeZoom(zoom: number) {
   if (!isTauri()) return;
   await invoke("set_chrome_zoom", { zoom });
+}
+
+/** Pauses (`pause: true`) or resumes a running download. */
+export async function pauseDownload(id: string, pause: boolean) {
+  if (!isTauri()) return;
+  await invoke("pause_download", { id, pause });
+}
+
+/** "Ask where to save each file". */
+export async function setDownloadAsk(ask: boolean) {
+  if (!isTauri()) return;
+  await invoke("set_download_ask", { ask });
 }
 
 export async function setDownloadDir(path: string) {
@@ -215,6 +254,8 @@ export interface LoadingEvent { label: string; loading: boolean }
 export interface OpenLinkEvent { label: string; url: string; background: boolean }
 export interface FullscreenEvent { label: string; fullscreen: boolean }
 export interface ExternalLinkEvent { label: string; url: string }
+/** Whether a page's own history can go back / forward. */
+export interface HistoryEvent { label: string; back: boolean; forward: boolean }
 export interface CrashEvent { label: string; kind: "crashed" | "unresponsive" | "engine" }
 export interface FindResult { count: number; index: number }
 export interface UpdateInfo { configured: boolean; current: string; available: string | null; notes: string | null }
@@ -285,38 +326,53 @@ export async function subscribeToBrowserEvents(handlers: {
   onFullscreen: (event: FullscreenEvent) => void;
   onExternalLink: (event: ExternalLinkEvent) => void;
   onCrashed: (event: CrashEvent) => void;
+  onHistory: (event: HistoryEvent) => void;
+  /** Tabs moved here from another window. */
+  onAdoptTabs: (start: WindowStart) => void;
+  /** Keyboard focus moved into a page (a click in a docked pane). */
+  onPageFocus: (label: string) => void;
+  /**
+   * Whether a page webview belongs to this window. Every Sleet window hears
+   * every page event; each handles only its own tabs' (downloads excepted:
+   * all windows list them).
+   */
+  owns: (label: string) => boolean;
 }) {
   if (!isTauri()) return () => undefined;
 
+  const mine = <T extends { label: string }>(handle: (payload: T) => void) =>
+    ({ payload }: { payload: T }) => { if (handlers.owns(payload.label)) handle(payload); };
+  const forThisWindow = <T extends { window: string }>(handle: (payload: T) => void) =>
+    ({ payload }: { payload: T }) => { if (payload.window === WINDOW_LABEL) handle(payload); };
+
   const unlisteners: UnlistenFn[] = await Promise.all([
-    listen<NavigationEvent>("sleet-navigation", ({ payload }) =>
-      handlers.onNavigation(payload),
-    ),
-    listen<TitleEvent>("sleet-title", ({ payload }) => handlers.onTitle(payload)),
-    listen<DownloadEvent>("sleet-download", ({ payload }) =>
-      handlers.onDownload(payload),
-    ),
-    listen<DownloadProgressEvent>("sleet-download-progress", ({ payload }) =>
-      handlers.onDownloadProgress(payload),
-    ),
+    listen<NavigationEvent>("sleet-navigation", mine(handlers.onNavigation)),
+    listen<TitleEvent>("sleet-title", mine(handlers.onTitle)),
+    listen<DownloadEvent>("sleet-download", ({ payload }) => handlers.onDownload(payload)),
+    listen<DownloadProgressEvent>("sleet-download-progress", ({ payload }) => handlers.onDownloadProgress(payload)),
     listen<DownloadStateEvent>("sleet-download-state", ({ payload }) => handlers.onDownloadState(payload)),
-    listen<DownloadCheckEvent>("sleet-download-check", ({ payload }) => handlers.onDownloadCheck(payload)),
-    listen<string>("sleet-new-tab", ({ payload }) => handlers.onNewTab(payload)),
-    listen<UrlEvent>("sleet-url", ({ payload }) => handlers.onUrl(payload)),
-    listen<PopupBlockedEvent>("sleet-popup-blocked", ({ payload }) => handlers.onPopupBlocked(payload)),
-    listen<PermissionRequestEvent>("sleet-permission-request", ({ payload }) => handlers.onPermissionRequest(payload)),
-    listen<CertErrorEvent>("sleet-cert-error", ({ payload }) => handlers.onCertError(payload)),
-    listen<HttpsFailedEvent>("sleet-https-failed", ({ payload }) => handlers.onHttpsFailed(payload)),
-    listen<FaviconEvent>("sleet-favicon", ({ payload }) => handlers.onFavicon(payload)),
-    listen<string[]>("sleet-open-urls", ({ payload }) => handlers.onOpenUrls(payload)),
-    listen<AudioEvent>("sleet-audio", ({ payload }) => handlers.onAudio(payload)),
-    listen<ContextEvent>("sleet-context", ({ payload }) => handlers.onContext(payload)),
-    listen<string>("sleet-command", ({ payload }) => handlers.onCommand(payload)),
-    listen<LoadingEvent>("sleet-loading", ({ payload }) => handlers.onLoading(payload)),
-    listen<OpenLinkEvent>("sleet-open-link", ({ payload }) => handlers.onOpenLink(payload)),
-    listen<FullscreenEvent>("sleet-fullscreen", ({ payload }) => handlers.onFullscreen(payload)),
-    listen<ExternalLinkEvent>("sleet-external-link", ({ payload }) => handlers.onExternalLink(payload)),
-    listen<CrashEvent>("sleet-page-crashed", ({ payload }) => handlers.onCrashed(payload)),
+    listen<DownloadCheckEvent>("sleet-download-check", mine(handlers.onDownloadCheck)),
+    listen<{ label: string; url: string }>("sleet-new-tab", mine(({ url }) => handlers.onNewTab(url))),
+    listen<UrlEvent>("sleet-url", mine(handlers.onUrl)),
+    listen<PopupBlockedEvent>("sleet-popup-blocked", mine(handlers.onPopupBlocked)),
+    listen<PermissionRequestEvent>("sleet-permission-request", mine(handlers.onPermissionRequest)),
+    listen<CertErrorEvent>("sleet-cert-error", mine(handlers.onCertError)),
+    listen<HttpsFailedEvent>("sleet-https-failed", mine(handlers.onHttpsFailed)),
+    listen<FaviconEvent>("sleet-favicon", mine(handlers.onFavicon)),
+    listen<{ window: string; urls: string[] }>("sleet-open-urls", forThisWindow(({ urls }) => handlers.onOpenUrls(urls))),
+    listen<{ window: string; tabs: string }>("sleet-adopt-tabs", forThisWindow(({ tabs }) => {
+      try { handlers.onAdoptTabs(JSON.parse(tabs) as WindowStart); } catch { /* ignore */ }
+    })),
+    listen<AudioEvent>("sleet-audio", mine(handlers.onAudio)),
+    listen<ContextEvent>("sleet-context", mine(handlers.onContext)),
+    listen<{ label: string; command: string }>("sleet-command", mine(({ command }) => handlers.onCommand(command))),
+    listen<LoadingEvent>("sleet-loading", mine(handlers.onLoading)),
+    listen<OpenLinkEvent>("sleet-open-link", mine(handlers.onOpenLink)),
+    listen<FullscreenEvent>("sleet-fullscreen", mine(handlers.onFullscreen)),
+    listen<ExternalLinkEvent>("sleet-external-link", mine(handlers.onExternalLink)),
+    listen<CrashEvent>("sleet-page-crashed", mine(handlers.onCrashed)),
+    listen<HistoryEvent>("sleet-history", mine(handlers.onHistory)),
+    listen<{ label: string }>("sleet-page-focus", mine(({ label }) => handlers.onPageFocus(label))),
   ]);
 
   return () => unlisteners.forEach((unlisten) => unlisten());

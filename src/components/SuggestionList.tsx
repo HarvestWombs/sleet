@@ -34,13 +34,13 @@ export function SuggestionList({ items, selected, onPick, onHover, variant = "in
             onMouseEnter={() => onHover?.(index)}
             tabIndex={-1}
           >
-            <span className="suggestion-icon">{(item.kind === "domain" || item.kind === "history") && item.icon ? <img src={item.icon} alt="" aria-hidden="true" /> : <Icon size={14} />}</span>
+            <span className="suggestion-icon">{(item.kind === "domain" || item.kind === "history") && item.icon ? <img src={item.icon} alt="" aria-hidden="true" /> : <Icon size={18} />}</span>
             <span className="suggestion-copy">
               <strong>{item.title}</strong>
               {item.subtitle && <small>{item.subtitle}</small>}
             </span>
             {item.shortcut && index !== enterIndex && <kbd>{item.shortcut}</kbd>}
-            {index === enterIndex && <CornerDownLeft size={13} className="suggestion-enter" />}
+            {index === enterIndex && <CornerDownLeft size={16} className="suggestion-enter" />}
           </button>
         );
       })}

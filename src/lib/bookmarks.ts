@@ -71,6 +71,11 @@ export function addBookmark(tree: Bookmark[], link: { title: string; url: string
   return insertAt(tree, node, parentId, Number.MAX_SAFE_INTEGER);
 }
 
+/** Adds an already-made link at the end of the top level. */
+export function insertBookmark(tree: Bookmark[], node: Bookmark): Bookmark[] {
+  return insertAt(tree, node, null, Number.MAX_SAFE_INTEGER);
+}
+
 export function removeBookmark(tree: Bookmark[], id: string): Bookmark[] {
   return tidy(without(tree, id)[0]);
 }

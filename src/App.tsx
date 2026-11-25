@@ -1,7 +1,7 @@
 import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BrowserPreview } from "./components/BrowserPreview";
 import { matchCommands, type PaletteCommand } from "./lib/commands";
-import { ContextMenu, type MenuEntry, type MenuRequest } from "./components/ContextMenu";
+import { ContextMenu, type MenuEntry, type MenuRequest, toMenuSpec } from "./components/ContextMenu";
 import { HomeSurface } from "./components/HomeSurface";
 import { LibrarySurface } from "./components/LibrarySurface";
 import { type ClearDataOptions, SettingsSurface } from "./components/SettingsSurface";
@@ -42,10 +42,13 @@ import {
   listenEvent,
   stepHistory,
   resizeView,
+  setDockedVisible,
   setChromeZoom,
   setDownloadDir,
   setViewMuted,
   cancelDownload as cancelNativeDownload,
+  pauseDownload as pauseNativeDownload,
+  setDownloadAsk,
   resolveDownloadCheck,
   setViewsZoom,
   subscribeToBrowserEvents,
@@ -62,33 +65,42 @@ import {
   type FullscreenEvent,
 } from "./native/browserEngine";
 import { FindBar } from "./components/FindBar";
+import { isModalPrompt, PromptModal } from "./components/PromptModal";
 import * as store from "./native/store";
 import { OVERLAY_EVENTS, type OverlayAction, type OverlayKind, type OverlayRendered, type OverlaySize, overlayLabel } from "./lib/overlay";
 import { neighbour, recordVisit } from "./lib/tabNav";
+import { dockTab, type DockNode, type DockSide, pruneLayouts, setRatio, sideAt, tabsIn, withoutTab } from "./lib/dock";
+import { DockView } from "./components/DockView";
+import { groupAfterMove, keepGroupsTogether, liveGroups, nextGroupColor, nextGroupName, setGroup, type TabGroup } from "./lib/tabGroups";
+import { canAutoOpen, extensionOf, normalizeExtension, shouldAutoOpen } from "./lib/downloadTypes";
+import { forgetSession, IS_MAIN_WINDOW, listWindows, moveTabsToWindow, openWindow, sessionKey, startedWithPages, WINDOW_LABEL, windowAt, type WindowInfo, type WindowStart, windowsToReopen } from "./lib/windows";
 import { buildSuggestions, type Suggestion } from "./lib/suggest";
-import { faviconFor, onFaviconsChanged, rememberFavicon, rememberFavicons } from "./lib/favicons";
-import { addBookmark, type Bookmark, findByUrl, groupBookmarks, moveBookmark, removeBookmark, ungroupFolder, updateBookmark } from "./lib/bookmarks";
+import { faviconFor, hasSharpFavicon, onFaviconsChanged, rememberFavicon, rememberFavicons, shrinkIcon } from "./lib/favicons";
+import { allLinks, type Bookmark, findBookmark, findByUrl, insertBookmark, makeBookmarkId, groupBookmarks, moveBookmark, removeBookmark, ungroupFolder, updateBookmark } from "./lib/bookmarks";
 import { BookmarkEditor, BookmarkGrid, type BookmarkState } from "./components/BookmarkGrid";
 import { type LoginItem, LoginsMenu } from "./components/LoginsMenu";
 import { useVaultStatus } from "./components/Passwords";
-import { type VaultEntry, vaultFill, vaultFillGenerated, vaultMatches, vaultOfferRecheck, vaultResolveOffer, vaultSetAutoLock, vaultError } from "./native/vault";
+import { type VaultEntry, vaultSetRemember, vaultFill, vaultFillGenerated, vaultMatches, vaultOfferRecheck, vaultResolveOffer, vaultSetAutoLock, vaultError } from "./native/vault";
 import type { AudioState, BrowserTab, CertErrorEvent, ContextEvent, HttpsFailedEvent, PermissionRequestEvent, PopupBlockedEvent, DownloadCheckEvent, DownloadEvent, DownloadStateEvent, DownloadItem, DownloadProgressEvent, HistoryEntry, SidebarMode, Surface, ViewBounds } from "./types";
 
-const initialTab: BrowserTab = { id: "home", title: "Home", url: HOME_URL, createdAt: Date.now() };
+// Unique per window: tab ids name page webviews, which every window shares one namespace for.
+const initialTab: BrowserTab = { id: IS_MAIN_WINDOW ? "home" : `home${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`, title: "Home", url: HOME_URL, createdAt: Date.now() };
 
-const DEFAULT_SIDEBAR_WIDTH = 220;
+const DEFAULT_SIDEBAR_WIDTH = 275;
 const RECENT_HISTORY = 200;
 const SHORTCUTS: Record<string, string> = {
-  k: "palette", l: "address", t: "new-tab", w: "close-tab", y: "history", j: "downloads", ",": "settings",
+  k: "palette", l: "address", t: "new-tab", n: "new-window", w: "close-tab", y: "history", j: "downloads", ",": "settings",
   "=": "zoom-in", "+": "zoom-in", "-": "zoom-out", "0": "zoom-reset", d: "bookmark",
   f: "find", g: "find-next", p: "print", r: "reload", tab: "next-tab", pagedown: "next-tab", pageup: "previous-tab",
 };
 const SHIFTED_SHORTCUTS: Record<string, string> = {
-  n: "new-private-tab", w: "reopen-tab", t: "reopen-tab", tab: "previous-tab", g: "find-previous", delete: "clear-data", r: "reload",
+  n: "new-private-tab", w: "reopen-tab", t: "reopen-tab", s: "toggle-sidebar", tab: "previous-tab", g: "find-previous", delete: "clear-data", r: "reload",
 };
 const NO_MATCHES: FindResult = { count: 0, index: -1 };
+/** Toolbar height in CSS pixels (the --toolbar variable). */
+const toolbarHeight = () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--toolbar")) || 58;
 const makeId = () => crypto.randomUUID().replaceAll("-", "").slice(0, 12);
-const clampSidebarWidth = (width: number) => Math.min(360, Math.max(176, Number.isFinite(width) ? width : DEFAULT_SIDEBAR_WIDTH));
+const clampSidebarWidth = (width: number) => Math.min(450, Math.max(220, Number.isFinite(width) ? width : DEFAULT_SIDEBAR_WIDTH));
 const filenameFrom = (url: string, path?: string) => {
   if (path) return path.split(/[\\/]/).at(-1) || "Download";
   try { return decodeURIComponent(new URL(url).pathname.split("/").at(-1) || "") || "Download"; } catch { return "Download"; }
@@ -102,13 +114,15 @@ const imageSearchUrl = (engine: string, imageUrl: string) => engine === "bing"
 const prefersLight = () => window.matchMedia?.("(prefers-color-scheme: light)").matches ?? false;
 
 export default function App() {
-  const [tabs, setTabs] = usePersistentState<BrowserTab[]>("sleet.tabs", [initialTab], (items) => {
+  // Each window keeps its own tabs (sessionKey); everything else is shared.
+  const [tabs, setTabs] = usePersistentState<BrowserTab[]>(sessionKey("sleet.tabs"), [initialTab], (items) => {
     const kept = items.filter((tab) => !tab.private).map(({ certError: _certError, ...tab }) => tab);
     return kept.length > 0 ? kept : [initialTab];
   });
-  const [activeId, setActiveId] = usePersistentState("sleet.active-tab", initialTab.id);
+  const [activeId, setActiveId] = usePersistentState(sessionKey("sleet.active-tab"), initialTab.id);
   const [bookmarks, setBookmarks] = usePersistentState<Bookmark[]>("sleet.bookmarks", []);
   const [expandedFolders, setExpandedFolders] = usePersistentState<string[]>("sleet.bookmark-folders", []);
+  const [bookmarksCollapsed, setBookmarksCollapsed] = usePersistentState("sleet.bookmarks-collapsed", false);
   const [editingBookmark, setEditingBookmark] = useState<Bookmark | null>(null);
   const vault = useVaultStatus();
   /** Saved logins for the active page (only while unlocked). */
@@ -120,6 +134,10 @@ export default function App() {
   const [storedSettings, setStoredSettings] = usePersistentState<Settings>(SETTINGS_KEY, DEFAULT_SETTINGS);
   const settings = useMemo(() => ({ ...DEFAULT_SETTINGS, ...storedSettings }), [storedSettings]);
   const sidebarWidth = clampSidebarWidth(savedSidebarWidth);
+  /** Sidebar hidden (Ctrl+Shift+S); the toolbar then shows a button to bring it back. */
+  const [sidebarHidden, setSidebarHidden] = usePersistentState("sleet.sidebar-hidden", false);
+  /** Width the sidebar takes on screen right now. */
+  const sidebarShown = sidebarHidden ? 0 : sidebarWidth;
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [historyVersion, setHistoryVersion] = useState(0);
   const [downloads, setDownloads] = useState<DownloadItem[]>([]);
@@ -127,12 +145,25 @@ export default function App() {
   const tooltip = useTooltips();
   const [audio, setAudio] = useState<Record<string, AudioState>>({});
   const [menu, setMenu] = useState<MenuRequest | null>(null);
+  /** The open menu as data to draw, plus its items' actions by id. */
+  const menuSpec = useMemo(() => (menu ? toMenuSpec(menu) : null), [menu]);
+  // The open menu's actions, kept apart from render so a pick arriving from the
+  // overlay always finds them.
+  const menuActions = useRef(new Map<string, () => void>());
+  if (menuSpec) menuActions.current = menuSpec.actions;
+  const runMenuItem = (id: string) => {
+    const action = menuActions.current.get(id);
+    setMenu(null);
+    action?.();
+  };
   const [surface, setSurface] = useState<Surface>("browser");
   const [sidebarMode, setSidebarMode] = useState<SidebarMode>("tabs");
   const [settingsSection, setSettingsSection] = useState<string | undefined>();
   /** Ctrl+K: the address bar lists commands as well as sites and searches. */
   const [commandMode, setCommandMode] = useState(false);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+  /** Which box the suggestions belong to: the address bar or Home's search. */
+  const [suggestAnchor, setSuggestAnchor] = useState<"address" | "home">("address");
   const [siteInfoOpen, setSiteInfoOpen] = useState(false);
   const [siteInfoSession, setSiteInfoSession] = useState(0);
   const [, setFaviconVersion] = useState(0);
@@ -159,10 +190,13 @@ export default function App() {
   const findSeq = useRef(0);
   const findTab = useRef<string | null>(null);
   const [clearRequest, setClearRequest] = useState(0);
+  /** Each page's own back/forward availability, as the engine reports it. */
+  const [pageHistory, setPageHistory] = useState<Record<string, { back: boolean; forward: boolean }>>({});
   const loadingRef = useRef(loadingTabs);
   loadingRef.current = loadingTabs;
   const pageRef = useRef<HTMLDivElement>(null);
-  const createdViews = useRef(new Set<string>());
+  // A window opened by moving tabs out of another starts with those pages already loaded.
+  const createdViews = useRef(new Set<string>(startedWithPages()));
   const lastActiveAt = useRef(new Map<string, number>());
   const suppressPageFocus = useRef(false);
   /** Tabs whose back/forward follow Sleet's saved history instead of the page's own (after an unload). */
@@ -184,6 +218,12 @@ export default function App() {
   surfaceRef.current = surface;
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
+  /** Whether a page webview is one of this window's tabs (every window hears every page's events). */
+  const ownsLabel = (label: string) => tabsRef.current.some((tab) => viewLabel(tab.id) === label);
+  /** Downloads started from this window's tabs (`private`: from a private tab, never saved). */
+  const ownDownloads = useRef(new Map<string, { private: boolean }>());
+  /** The other open Sleet windows, for "Move to window". */
+  const [otherWindows, setOtherWindows] = useState<WindowInfo[]>([]);
 
   const activeTab = useMemo(() => tabs.find((tab) => tab.id === activeId) ?? tabs[0], [activeId, tabs]);
   const tabKey = tabs.map((tab) => tab.id).join(",");
@@ -213,11 +253,15 @@ export default function App() {
     setToasts((items) => [...items, { id: makeId(), message, expiresAt: Date.now() + settingsRef.current.toastSeconds * 1000 }]);
   }, []);
 
-  /** Page bounds in window logical pixels (CSS pixels scaled by interface zoom). */
-  const getBounds = useCallback((): ViewBounds | null => {
-    const rect = pageRef.current?.getBoundingClientRect();
+  /**
+   * Where a tab's page goes, in window logical pixels (CSS pixels scaled by
+   * interface zoom): its pane when docked, else the whole page area.
+   */
+  const getBounds = useCallback((tabId: string = activeIdRef.current): ViewBounds | null => {
+    const pane = document.querySelector<HTMLElement>(`[data-dock-body="${CSS.escape(tabId)}"]`);
+    const rect = (pane ?? pageRef.current)?.getBoundingClientRect();
     if (!rect || rect.width < 1 || rect.height < 1) return null;
-    const scale = settingsRef.current.appZoom || 1;
+    const scale = (settingsRef.current.appZoom || 1);
     return { x: Math.round(rect.x * scale), y: Math.round(rect.y * scale), width: Math.round(rect.width * scale), height: Math.round(rect.height * scale) };
   }, []);
 
@@ -253,10 +297,20 @@ export default function App() {
     }));
   }, []);
 
+  const focusHomeSearch = useCallback(async () => {
+    await focusChrome();
+    // Home mounts on the next render; wait for it, then fall back to the address bar.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const input = document.querySelector<HTMLInputElement>("[data-home-search]");
+      if (input) input.focus();
+      else void focusAddress();
+    }));
+  }, [focusAddress]);
+
   /** Creates the page webview for a tab if it has none (new, unloaded, or leaving home). */
   const ensureView = useCallback(async (tabId: string, url: string) => {
     if (isHomeUrl(url) || createdViews.current.has(tabId)) return;
-    const bounds = getBounds();
+    const bounds = getBounds(tabId);
     if (!bounds) return;
     createdViews.current.add(tabId);
     lastActiveAt.current.set(tabId, Date.now());
@@ -284,14 +338,16 @@ export default function App() {
     setTabs(next);
     if (options.background) {
       if (!isHomeUrl(url)) setSleeping((current) => new Set([...current, tab.id]));
-      return;
+      return tab.id;
     }
     setActiveId(tab.id);
     setSurface("browser");
     setSidebarMode("tabs");
     await ensureView(tab.id, url);
-    if (options.focusAddress) void focusAddress();
-  }, [ensureView, focusAddress, setActiveId, setTabs]);
+    // A new tab on the Home page types into Home's own search box; other pages use the address bar.
+    if (options.focusAddress) void (isHomeUrl(url) ? focusHomeSearch() : focusAddress());
+    return tab.id;
+  }, [ensureView, focusAddress, focusHomeSearch, setActiveId, setTabs]);
 
   const navigate = useCallback(async (input: string) => {
     if (!activeTab) return;
@@ -319,16 +375,19 @@ export default function App() {
    * Closes several tabs at once. The tab list is computed once up front, so
    * "close tabs above/below/others" removes every tab, not just the first few.
    */
-  const closeTabs = useCallback(async (ids: string[]) => {
+  const closeTabs = useCallback(async (ids: string[], options: { detach?: boolean } = {}) => {
     const closing = new Set(ids);
     const before = tabsRef.current;
     if (!before.some((tab) => closing.has(tab.id))) return;
     const remaining = before.filter((tab) => !closing.has(tab.id));
     const activeIndex = before.findIndex((tab) => tab.id === activeIdRef.current);
-    before.forEach((tab, index) => {
-      if (closing.has(tab.id)) closedTabs.current.push({ tab: { ...tab, certError: undefined }, index });
-    });
-    closedTabs.current = closedTabs.current.slice(-25);
+    // Detached tabs moved to another window: their pages live on there.
+    if (!options.detach) {
+      before.forEach((tab, index) => {
+        if (closing.has(tab.id)) closedTabs.current.push({ tab: { ...tab, certError: undefined }, index });
+      });
+      closedTabs.current = closedTabs.current.slice(-25);
+    }
     tabsRef.current = remaining;
     ids.forEach((id) => {
       createdViews.current.delete(id);
@@ -339,9 +398,12 @@ export default function App() {
     setSleeping((current) => { const next = new Set(current); ids.forEach((id) => next.delete(id)); return next; });
     setLoadingTabs((current) => { const next = new Set(current); ids.forEach((id) => next.delete(id)); return next; });
     setCrashed((current) => { const next = { ...current }; ids.forEach((id) => delete next[id]); return next; });
+    setPageHistory((current) => { const next = { ...current }; ids.forEach((id) => delete next[id]); return next; });
     setTabs(remaining);
-    await Promise.all(ids.map((id) => closeView(id)));
+    if (!options.detach) await Promise.all(ids.map((id) => closeView(id)));
     if (remaining.length === 0) {
+      // Every tab left for another window: this one closes.
+      if (options.detach) { void getCurrentWindow().close(); return; }
       await newTab();
       return;
     }
@@ -353,6 +415,52 @@ export default function App() {
   }, [newTab, selectTab, setTabs]);
 
   const closeTab = useCallback((id: string) => closeTabs([id]), [closeTabs]);
+
+  /**
+   * Moves tabs to another window (`target`) or a new one, pages and all: the
+   * page webviews change windows without reloading. `position` places a new
+   * window (physical screen pixels), e.g. where a dragged tab was dropped.
+   */
+  const moveTabsToOtherWindow = useCallback(async (ids: string[], target: string | null, position?: [number, number]) => {
+    const moving = tabsRef.current.filter((tab) => ids.includes(tab.id));
+    if (moving.length === 0) return;
+    const live = moving.filter((tab) => createdViews.current.has(tab.id)).map((tab) => tab.id);
+    const start: WindowStart = {
+      // Groups belong to a window; moved tabs arrive ungrouped.
+      tabs: moving.map(({ certError: _certError, groupId: _groupId, ...tab }) => tab),
+      activeId: (moving.find((tab) => tab.id === activeIdRef.current) ?? moving[0]).id,
+      live,
+    };
+    const pages = live.map(viewLabel);
+    try {
+      if (target) await moveTabsToWindow(target, start, pages);
+      else await openWindow({ start, movePages: pages, position });
+    } catch (error) {
+      showMessage(String(error));
+      return;
+    }
+    await closeTabs(ids, { detach: true });
+  }, [closeTabs, showMessage]);
+
+  /** Tabs arriving from another window (their pages are already here). */
+  const adoptTabs = useCallback((start: WindowStart) => {
+    const arriving = (start.tabs as BrowserTab[]).filter((tab) => tab && typeof tab.id === "string" && !tabsRef.current.some((item) => item.id === tab.id));
+    if (arriving.length === 0) return;
+    (start.live ?? []).forEach((id) => createdViews.current.add(id));
+    const next = [...tabsRef.current, ...arriving];
+    tabsRef.current = next;
+    setTabs(next);
+    const active = arriving.find((tab) => tab.id === start.activeId) ?? arriving[0];
+    setSurface("browser");
+    selectTab(active.id);
+    const bounds = getBounds();
+    if (bounds) arriving.forEach((tab) => { if (createdViews.current.has(tab.id)) void resizeView(tab.id, bounds); });
+  }, [getBounds, selectTab, setTabs]);
+
+  /** Opens another Sleet window on the new tab page. */
+  const newWindow = useCallback(() => {
+    void openWindow().catch((error) => showMessage(String(error)));
+  }, [showMessage]);
 
   /** Brings back the most recently closed tab where it was, with its history. */
   const reopenClosedTab = useCallback(async () => {
@@ -392,17 +500,180 @@ export default function App() {
     await activateView(tab.id, tabsRef.current.map((item) => item.id), true);
   }, [ensureView, setTabs]);
 
-  const reorderTab = useCallback((id: string, toIndex: number) => {
+  /**
+   * Moves a tab to `toIndex`. `groupId` says which group it lands in (`null`:
+   * none), as the sidebar's drop line showed; left out (menu Move up/down), the
+   * neighbours decide.
+   */
+  const reorderTab = useCallback((id: string, toIndex: number, groupId?: string | null) => {
     setTabs((items) => {
       const from = items.findIndex((tab) => tab.id === id);
       if (from === -1) return items;
       const target = from < toIndex ? toIndex - 1 : toIndex;
-      if (target === from) return items;
+      const group = groupId === undefined ? undefined : groupId ?? undefined;
+      if (target === from && (groupId === undefined || items[from].groupId === group)) return items;
       const next = items.filter((tab) => tab.id !== id);
-      next.splice(Math.max(0, Math.min(target, next.length)), 0, items[from]);
-      return next;
+      const at = Math.max(0, Math.min(target, next.length));
+      next.splice(at, 0, items[from]);
+      next[at] = { ...next[at], groupId: groupId === undefined ? groupAfterMove(next, at) : group };
+      return keepGroupsTogether(next);
     });
   }, [setTabs]);
+
+  // ---- Tab groups
+  /** Groups for this window's tabs (empty ones disappear). */
+  const [storedGroups, setTabGroups] = usePersistentState<TabGroup[]>(sessionKey("sleet.tab-groups"), []);
+  const tabGroups = useMemo(() => liveGroups(storedGroups, tabs), [storedGroups, tabs]);
+  /** Group whose name is being edited in the sidebar. */
+  const [editingGroup, setEditingGroup] = useState<string | null>(null);
+  useEffect(() => {
+    if (tabGroups.length !== storedGroups.length) setTabGroups(tabGroups);
+  }, [tabGroups, storedGroups.length, setTabGroups]);
+
+  /** Puts tabs in a group: an existing one, or a new one (`groupId` null) whose name is then edited. */
+  const groupTabs = useCallback((ids: string[], groupId: string | null) => {
+    let id = groupId;
+    if (!id) {
+      id = makeId();
+      const created: TabGroup = { id, name: nextGroupName(storedGroups), color: nextGroupColor(tabGroups) };
+      setTabGroups((groups) => [...groups, created]);
+      setEditingGroup(id);
+    }
+    const target = id;
+    setTabs((items) => setGroup(items, ids, target));
+    setTabGroups((groups) => groups.map((group) => group.id === target ? { ...group, collapsed: false } : group));
+  }, [setTabGroups, setTabs, storedGroups, tabGroups]);
+
+  // ---- Docking: tabs side by side in the page area (lib/dock.ts)
+  const [storedDocks, setDocks] = usePersistentState<DockNode[]>(sessionKey("sleet.docks"), []);
+  const docks = useMemo(() => pruneLayouts(storedDocks, new Set(tabs.map((tab) => tab.id))), [storedDocks, tabs]);
+  useEffect(() => { if (docks !== storedDocks && JSON.stringify(docks) !== JSON.stringify(storedDocks)) setDocks(docks); }, [docks, storedDocks, setDocks]);
+  /** The layout holding the active tab: shown while on the browser surface. */
+  const activeLayout = docks.find((layout) => tabsIn(layout).includes(activeId)) ?? null;
+  const dockShowing = surface === "browser" && !!activeLayout;
+  const dockedTabs = useMemo(() => tabsIn(activeLayout), [activeLayout]);
+  /** A tab being dragged for docking, and where it would land. */
+  type DockDrag = { tabId: string; from: "sidebar" | "pane"; target: string | null; side: DockSide | null };
+  const [dockDrag, setDockDrag] = useState<DockDrag | null>(null);
+  const dockDragRef = useRef<DockDrag | null>(null);
+  const dockedIds = useMemo(() => new Set(docks.flatMap(tabsIn)), [docks]);
+  /** Draw the docked layout (or, while dragging over a single page, that page as a drop target). */
+  const showDockView = surface === "browser" && (dockShowing || (!!dockDrag && !activeIsHome));
+  const tabsById = useMemo(() => new Map(tabs.map((tab) => [tab.id, tab])), [tabs]);
+
+  /** Docks a tab beside another and makes it the active one. */
+  const dockTabNextTo = useCallback((tabId: string, target: string, side: DockSide) => {
+    if (tabId === target) return;
+    setDocks((layouts) => dockTab(pruneLayouts(layouts, new Set(tabsRef.current.map((tab) => tab.id))), tabId, target, side));
+    // Docked tabs share a group: the target's, or a new "Split view" group for the layout.
+    const targetGroup = tabsRef.current.find((tab) => tab.id === target)?.groupId;
+    if (targetGroup) {
+      setTabs((items) => setGroup(items, [tabId], targetGroup));
+    } else {
+      const id = makeId();
+      setTabGroups((groups) => [...groups, { id, name: "Split view", color: nextGroupColor(groups), docked: true }]);
+      setTabs((items) => setGroup(items, [target, tabId], id));
+    }
+    selectTab(tabId);
+  }, [selectTab, setDocks, setTabGroups, setTabs]);
+
+  // A tab that leaves its layout (undocked, or the layout ended) leaves the group made for it.
+  useEffect(() => {
+    const auto = new Set(tabGroups.filter((group) => group.docked).map((group) => group.id));
+    const stray = tabs.filter((tab) => tab.groupId && auto.has(tab.groupId) && !dockedIds.has(tab.id)).map((tab) => tab.id);
+    if (stray.length > 0) setTabs((items) => setGroup(items, stray, undefined));
+  }, [tabs, tabGroups, dockedIds, setTabs]);
+
+  /** Takes a tab out of its layout (it stays open as a tab of its own); the layout stays on screen. */
+  const undockTab = useCallback((tabId: string) => {
+    const layout = docks.find((item) => tabsIn(item).includes(tabId));
+    setDocks((layouts) => withoutTab(layouts, tabId));
+    if (layout && tabId === activeIdRef.current) {
+      const next = tabsIn(layout).find((id) => id !== tabId);
+      if (next) selectTab(next);
+    }
+  }, [docks, selectTab, setDocks]);
+
+  /** Drag in progress over the page area (`x`, `y` in chrome CSS pixels): find the pane and side under the pointer. */
+  const dockDragMove = useCallback((tabId: string, from: "sidebar" | "pane", x: number, y: number) => {
+    const tab = tabsRef.current.find((item) => item.id === tabId);
+    if (!tab || isHomeUrl(tab.url)) return;
+    const paneElement = document.elementsFromPoint(x, y).map((element) => (element as HTMLElement).closest<HTMLElement>("[data-dock-pane]")).find(Boolean);
+    const target = paneElement?.dataset.dockPane ?? null;
+    const targetTab = target ? tabsRef.current.find((item) => item.id === target) : undefined;
+    const side = paneElement && target !== tabId && targetTab && !isHomeUrl(targetTab.url) ? sideAt(paneElement.getBoundingClientRect(), x, y) : null;
+    const next = { tabId, from, target: side ? target : null, side };
+    dockDragRef.current = next;
+    setDockDrag((current) => current && current.target === next.target && current.side === next.side && current.tabId === tabId ? current : next);
+  }, []);
+
+  /** The sidebar's drag left the page area again: no docking. */
+  const dockDragLeave = useCallback(() => { dockDragRef.current = null; setDockDrag(null); }, []);
+
+  /** Drag ended. Dropped on a pane's edge it docks; a pane dropped over the sidebar undocks. */
+  const dockDragEnd = useCallback((x: number, y: number, cancelled = false) => {
+    const drag = dockDragRef.current;
+    dockDragRef.current = null;
+    setDockDrag(null);
+    if (!drag || cancelled) return;
+    if (drag.target && drag.side) { dockTabNextTo(drag.tabId, drag.target, drag.side); return; }
+    if (drag.from === "pane") {
+      const page = pageRef.current?.getBoundingClientRect();
+      const outside = !page || x < page.left || y < page.top || x > page.right || y > page.bottom;
+      if (outside) undockTab(drag.tabId);
+    }
+  }, [dockTabNextTo, undockTab]);
+
+  /** A docked pane's title bar is being dragged: follow the pointer until it's released. */
+  const startPaneDrag = useCallback((tabId: string, start: PointerEvent) => {
+    const controller = new AbortController();
+    document.body.classList.add("is-dragging-tab");
+    dockDragMove(tabId, "pane", start.clientX, start.clientY);
+    window.addEventListener("pointermove", (move) => dockDragMove(tabId, "pane", move.clientX, move.clientY), { signal: controller.signal });
+    const finish = (end: PointerEvent) => {
+      controller.abort();
+      document.body.classList.remove("is-dragging-tab");
+      dockDragEnd(end.clientX, end.clientY, end.type === "pointercancel");
+    };
+    window.addEventListener("pointerup", finish, { signal: controller.signal });
+    window.addEventListener("pointercancel", finish, { signal: controller.signal });
+    window.addEventListener("keydown", (key) => { if (key.key === "Escape") { controller.abort(); document.body.classList.remove("is-dragging-tab"); dockDragEnd(0, 0, true); } }, { signal: controller.signal });
+  }, [dockDragEnd, dockDragMove]);
+
+  // Every pane of the shown layout has its page loaded and sized to its pane.
+  useEffect(() => {
+    if (!dockShowing) return;
+    dockedTabs.forEach((id) => {
+      const tab = tabsRef.current.find((item) => item.id === id);
+      if (tab) void ensureView(id, tab.url);
+    });
+  }, [dockShowing, dockedTabs, ensureView]);
+  const layoutDockedViews = useCallback(() => {
+    if (!dockShowing) return;
+    requestAnimationFrame(() => dockedTabs.forEach((id) => {
+      const bounds = getBounds(id);
+      if (bounds && createdViews.current.has(id)) void resizeView(id, bounds);
+    }));
+  }, [dockShowing, dockedTabs, getBounds]);
+  useEffect(() => {
+    layoutDockedViews();
+    const slot = pageRef.current;
+    if (!slot || !dockShowing) return;
+    const observer = new ResizeObserver(layoutDockedViews);
+    observer.observe(slot);
+    return () => observer.disconnect();
+  }, [layoutDockedViews, activeLayout, dockShowing]);
+
+  // Switching to a tab in a folded group opens the group.
+  useEffect(() => {
+    const groupId = tabsRef.current.find((tab) => tab.id === activeId)?.groupId;
+    if (groupId) setTabGroups((groups) => groups.some((group) => group.id === groupId && group.collapsed) ? groups.map((group) => group.id === groupId ? { ...group, collapsed: false } : group) : groups);
+  }, [activeId, setTabGroups]);
+
+  const ungroupTabs = useCallback((ids: string[]) => setTabs((items) => setGroup(items, ids, undefined)), [setTabs]);
+  const updateGroup = useCallback((id: string, change: Partial<TabGroup>) => {
+    setTabGroups((groups) => groups.map((group) => group.id === id ? { ...group, ...change } : group));
+  }, [setTabGroups]);
 
   const toggleMute = useCallback((id: string) => {
     const muted = !(audio[id]?.muted ?? false);
@@ -435,18 +706,31 @@ export default function App() {
     void setViewsZoom([tab.id], next);
   }, [activeId, setTabs]);
 
+  /** Saves a download's record. Only the window it started in writes it, and never for private tabs. */
   const saveDownload = (item: DownloadItem) => {
-    const tabId = item.id.slice(0, item.id.indexOf(":")).replace(/^page-/, "");
-    if (tabsRef.current.find((tab) => tab.id === tabId)?.private) return;
-    void store.downloadPut(item).catch(() => undefined);
+    const own = ownDownloads.current.get(item.id);
+    if (!own || own.private) return Promise.resolve(false);
+    const { paused: _paused, ...row } = item;
+    return store.downloadPut(row).then(() => true, () => false);
+  };
+
+  /** Applies a change to one download in the list (and the ref, for handlers running before the next render). */
+  const patchDownload = (id: string, change: (item: DownloadItem) => DownloadItem) => {
+    downloadsRef.current = downloadsRef.current.map((item) => item.id === id ? change(item) : item);
+    setDownloads((items) => items.map((item) => item.id === id ? change(item) : item));
   };
 
   const handleDownload = useCallback((event: DownloadEvent) => {
     const id = `${event.label}:${event.url}`;
     if (event.phase === "requested") {
       const item: DownloadItem = { id, filename: filenameFrom(event.url, event.path), url: event.url, path: event.path, status: "active", startedAt: Date.now() };
+      downloadsRef.current = [item, ...downloadsRef.current.filter((existing) => existing.id !== id)];
       setDownloads((items) => [item, ...items.filter((existing) => existing.id !== id)]);
-      saveDownload(item);
+      // Every window lists it; the one whose tab started it saves it and shows the notice.
+      const tab = tabsRef.current.find((entry) => viewLabel(entry.id) === event.label);
+      if (!tab) return;
+      ownDownloads.current.set(id, { private: !!tab.private });
+      void saveDownload(item);
       if (settingsRef.current.downloadToasts) setToasts((items) => [...items.filter((toast) => toast.id !== id), { id, downloadId: id, expiresAt: Date.now() + settingsRef.current.toastSeconds * 1000 }]);
       return;
     }
@@ -468,21 +752,55 @@ export default function App() {
       path: path ?? previous.path,
       filename: filenameFrom(previous.url, path ?? previous.path),
       status,
+      paused: undefined,
       error: status === "failed" ? error ?? "Download failed" : undefined,
       received: status === "complete" && previous.total ? previous.total : previous.received,
     };
-    downloadsRef.current = downloadsRef.current.map((item) => item.id === id ? finished : item);
-    setDownloads((items) => items.map((item) => item.id === id ? finished : item));
-    saveDownload(finished);
+    patchDownload(id, () => finished);
+    const saved = saveDownload(finished);
     const hideAt = Date.now() + settingsRef.current.toastSeconds * 1000;
     setToasts((items) => items.map((toast) => toast.id === id && toast.expiresAt !== null ? { ...toast, expiresAt: hideAt, leaving: false } : toast));
+    // "Always open files of this type" (opening goes through the saved record).
+    if (status === "complete" && ownDownloads.current.has(id) && shouldAutoOpen(finished.filename, settingsRef.current.autoOpenTypes)) {
+      void saved.then((ok) => { if (ok) void store.openDownload(id).catch(() => undefined); });
+    }
   };
 
   const handleDownloadState = useCallback((event: DownloadStateEvent) => {
-    finishDownload(`${event.label}:${event.url}`, event.state, event.path ?? undefined, event.reason ?? undefined);
+    const id = `${event.label}:${event.url}`;
+    const reason = event.reason ?? undefined;
+    if (event.state === "paused" || event.state === "active") {
+      patchDownload(id, (item) => item.status !== "active" ? item : {
+        ...item,
+        paused: event.state === "paused",
+        error: event.state === "paused" ? reason : undefined,
+        // Save as: the file goes where the user chose.
+        ...(event.path ? { path: event.path, filename: filenameFrom(item.url, event.path) } : {}),
+      });
+      if (event.path) {
+        const item = downloadsRef.current.find((entry) => entry.id === id);
+        if (item) void saveDownload(item);
+      }
+      return;
+    }
+    if (event.state === "discarded") {
+      // The Save as dialog was closed: nothing was downloaded, so leave no trace.
+      downloadsRef.current = downloadsRef.current.filter((item) => item.id !== id);
+      setDownloads((items) => items.filter((item) => item.id !== id));
+      setToasts((items) => items.filter((toast) => toast.id !== id));
+      if (ownDownloads.current.delete(id)) void store.downloadDelete(id).catch(() => undefined);
+      return;
+    }
+    finishDownload(id, event.state, event.path ?? undefined, reason);
   }, []);
 
   const handleDownloadCheck = useCallback((event: DownloadCheckEvent) => {
+    // "Don't ask again for this file type": keep it without asking.
+    const type = normalizeExtension(event.extension);
+    if (type && settingsRef.current.trustedDownloadTypes.includes(type)) {
+      void resolveDownloadCheck(event.checkId, true);
+      return;
+    }
     setToasts((items) => [...items, { id: `check-${event.checkId}`, check: event, expiresAt: null }]);
   }, []);
 
@@ -500,10 +818,15 @@ export default function App() {
     }));
   }, []);
 
-  const resolveCheck = useCallback((check: DownloadCheckEvent, keep: boolean) => {
+  /** Keep or delete a file Windows flagged; `remember` stops asking for that file type. */
+  const resolveCheck = useCallback((check: DownloadCheckEvent, keep: boolean, remember = false) => {
     setToasts((items) => items.filter((toast) => toast.id !== `check-${check.checkId}`));
     void resolveDownloadCheck(check.checkId, keep);
-  }, []);
+    const type = normalizeExtension(check.extension);
+    if (keep && remember && type && !settingsRef.current.trustedDownloadTypes.includes(type)) {
+      updateSettings({ trustedDownloadTypes: [...settingsRef.current.trustedDownloadTypes, type].sort() });
+    }
+  }, [updateSettings]);
 
   const cancelDownload = useCallback((download: DownloadItem) => {
     if (download.status !== "active") return;
@@ -511,6 +834,27 @@ export default function App() {
     // Mark it straight away; the engine's own "cancelled" report changes nothing further.
     finishDownload(download.id, "cancelled");
   }, []);
+
+  /** Pauses a running download, or resumes a paused one. */
+  const togglePauseDownload = useCallback((download: DownloadItem) => {
+    if (download.status !== "active") return;
+    const pause = !download.paused;
+    // Show it straight away; the engine confirms with its own state report.
+    patchDownload(download.id, (item) => ({ ...item, paused: pause, error: pause ? item.error : undefined }));
+    pauseNativeDownload(download.id, pause).catch((error) => {
+      patchDownload(download.id, (item) => ({ ...item, paused: !pause }));
+      showMessage(String(error));
+    });
+  }, [showMessage]);
+
+  /** Turns "always open files of this type" on or off for a download's extension. */
+  const toggleAutoOpen = useCallback((download: DownloadItem) => {
+    const extension = extensionOf(download.filename);
+    if (!canAutoOpen(extension)) return;
+    const current = settingsRef.current.autoOpenTypes;
+    const next = current.includes(extension) ? current.filter((item) => item !== extension) : [...current, extension].sort();
+    updateSettings({ autoOpenTypes: next });
+  }, [updateSettings]);
 
   const handleDownloadProgress = useCallback((event: DownloadProgressEvent) => {
     const id = `${event.label}:${event.url}`;
@@ -537,6 +881,7 @@ export default function App() {
   /** Ctrl+K: focus the address bar and list every command in its dropdown. */
   const openPalette = useCallback(async () => {
     await focusAddress();
+    setSuggestAnchor("address");
     setCommandMode(true);
     setSelectedSuggestion(-1);
     setSuggestions(commandRows(""));
@@ -604,6 +949,7 @@ export default function App() {
     if (command === "palette") { if (commandMode) closePalette(); else void openPalette(); }
     if (command === "address") void focusAddress();
     if (command === "new-tab") void newTab(undefined, { focusAddress: true });
+    if (command === "new-window") newWindow();
     if (command === "close-tab" && activeTab) void closeTab(activeTab.id);
     if (command === "new-private-tab") void newTab(undefined, { private: true, focusAddress: true });
     if (command === "reopen-tab") void reopenClosedTab();
@@ -614,13 +960,14 @@ export default function App() {
     if (command === "zoom-in") setZoom(1);
     if (command === "zoom-out") setZoom(-1);
     if (command === "zoom-reset") setZoom(0);
-  }, [activeTab, closePalette, closeTab, commitTabDigits, focusAddress, goHistory, newTab, openPalette, openSettings, commandMode, pushTabDigit, reopenClosedTab, setZoom, surface, toggleSurface]);
+  }, [activeTab, closePalette, closeTab, commitTabDigits, focusAddress, goHistory, newTab, newWindow, openPalette, openSettings, commandMode, pushTabDigit, reopenClosedTab, setZoom, surface, toggleSurface]);
   const runShortcutRef = useRef(runShortcut);
   runShortcutRef.current = runShortcut;
 
   const runPaletteCommand = (command: PaletteCommand) => {
     if (command.kind === "navigate") void navigate(command.value);
     if (command.kind === "new-tab") void newTab(undefined, { focusAddress: true });
+    if (command.kind === "new-window") newWindow();
     if (command.kind === "history") setSurface("history");
     if (command.kind === "downloads") setSurface("downloads");
     if (command.kind === "settings") openSettings(command.section);
@@ -631,6 +978,7 @@ export default function App() {
     if (command.kind === "print") void printActive();
     if (command.kind === "save-pdf") void savePdfActive();
     if (command.kind === "fullscreen") setWindowFullscreen((on) => !on);
+    if (command.kind === "toggle-sidebar") setSidebarHidden((hidden) => !hidden);
     if (command.kind === "toggle-theme") {
       const light = settings.theme === "light" || (settings.theme === "system" && systemLight);
       updateSettings({ theme: light ? "dark" : "light" });
@@ -638,7 +986,16 @@ export default function App() {
   };
 
   // Launch: move old localStorage lists into SQLite, apply retention, load lists.
+  // A window opened later only loads the lists (downloads still running elsewhere stay running).
   useEffect(() => {
+    if (!IS_MAIN_WINDOW) {
+      void store.downloadsList(500).then((rows) => {
+        const known = new Set(downloadsRef.current.map((item) => item.id));
+        setDownloads((items) => [...items, ...rows.filter((row) => !known.has(row.id))]);
+      }).catch(() => undefined);
+      void refreshHistory();
+      return;
+    }
     void (async () => {
       await store.importLegacyLists();
       const { historyRetention, clearCompletedDownloads } = settingsRef.current;
@@ -655,11 +1012,22 @@ export default function App() {
   // ---- Passwords: save prompts, the fill dropdown, logins for this page.
   useEffect(() => { void vaultSetAutoLock(settings.vaultAutoLock); }, [settings.vaultAutoLock]);
 
+  /** Saved logins can be used: unlocked, or "remember on this device" (Sleet unlocks itself). */
+  const vaultUsable = !!vault && (vault.unlocked || vault.remembered);
+
   useEffect(() => {
     const url = activeTab && !isHomeUrl(activeTab.url) ? activeTab.url : "";
-    if (!vault?.unlocked || !url) { setPageLogins([]); return; }
+    if (!vaultUsable || !url) { setPageLogins([]); return; }
     void vaultMatches(url).then(setPageLogins).catch(() => setPageLogins([]));
-  }, [activeTab?.url, vault?.unlocked, vault?.count]);
+  }, [activeTab?.url, vaultUsable, vault?.unlocked, vault?.count]);
+
+  // Unlocked with the master password on a device that isn't remembered: offer once to stop asking.
+  useEffect(() => {
+    if (!vault?.unlocked || vault.remembered || settingsRef.current.rememberDevicePromptDismissed) return;
+    setToasts((items) => items.some((item) => item.id === "remember-device")
+      ? items
+      : [...items, { id: "remember-device", prompt: { kind: "remember-device" }, expiresAt: null }]);
+  }, [vault?.unlocked, vault?.remembered]);
 
   // After unlocking, re-ask about logins that were waiting for it.
   useEffect(() => {
@@ -700,9 +1068,9 @@ export default function App() {
   const openToolbarLogins = () => {
     if (!activeTab) return;
     const field = document.querySelector<HTMLElement>(".address")?.getBoundingClientRect();
-    const zoom = settingsRef.current.appZoom || 1;
-    const items = loginItemsFor(pageLogins, { newPassword: false, locked: !vault?.unlocked });
-    setLoginsMenu({ label: viewLabel(activeTab.id), anchor: { x: (field?.right ?? 600) * zoom - 300 * zoom, y: ((field?.bottom ?? 44) + 6) * zoom, width: 300 * zoom }, items, from: "toolbar" });
+    const zoom = (settingsRef.current.appZoom || 1);
+    const items = loginItemsFor(pageLogins, { newPassword: false, locked: !vaultUsable });
+    setLoginsMenu({ label: viewLabel(activeTab.id), anchor: { x: (field?.right ?? 750) * zoom - 375 * zoom, y: ((field?.bottom ?? toolbarHeight()) + 8) * zoom, width: 375 * zoom }, items, from: "toolbar" });
   };
 
   useEffect(() => {
@@ -710,6 +1078,7 @@ export default function App() {
     let blurTimer: number | undefined;
     const stops = [
       listenEvent<{ label: string; pendingId: string; origin: string; username: string; kind: "new" | "update" | "locked" }>("sleet-password-offer", ({ payload }) => {
+        if (!ownsLabel(payload.label)) return;
         const current = settingsRef.current;
         if (!current.passwordsOffer || (current.passwordsNever ?? []).includes(payload.origin)) {
           void vaultResolveOffer(payload.pendingId, true).catch(() => undefined);
@@ -728,9 +1097,10 @@ export default function App() {
           if (!status?.exists && !payload.newPassword) return;
           const tab = tabsRef.current.find((item) => viewLabel(item.id) === payload.label);
           if (!tab || tab.id !== activeIdRef.current) return;
-          const entries = status?.unlocked ? await vaultMatches(payload.origin).catch(() => []) : [];
-          const locked = !!status?.exists && !status.unlocked;
-          const items = loginItemsForRef.current(entries, { newPassword: payload.newPassword && !!status?.unlocked, locked });
+          const usable = !!status && (status.unlocked || status.remembered);
+          const entries = usable ? await vaultMatches(payload.origin).catch(() => []) : [];
+          const locked = !!status?.exists && !usable;
+          const items = loginItemsForRef.current(entries, { newPassword: payload.newPassword && usable, locked });
           if (items.length === 0) { setLoginsMenu(null); return; }
           // Field box (page CSS px) → window logical px: page bounds + zoomed offset.
           const bounds = getBounds();
@@ -738,13 +1108,14 @@ export default function App() {
           if (!bounds) return;
           setLoginsMenu({
             label: payload.label,
-            anchor: { x: bounds.x + payload.x * pageZoom, y: bounds.y + (payload.y + payload.height) * pageZoom + 4, width: payload.width * pageZoom },
+            anchor: { x: bounds.x + payload.x * pageZoom, y: bounds.y + (payload.y + payload.height) * pageZoom + 5, width: payload.width * pageZoom },
             items,
             from: "field",
           });
         })();
       }),
-      listenEvent<string>("sleet-login-blur", () => {
+      listenEvent<string>("sleet-login-blur", ({ payload }) => {
+        if (!ownsLabel(payload)) return;
         window.clearTimeout(blurTimer);
         blurTimer = window.setTimeout(() => setLoginsMenu((menu) => (menu?.from === "field" ? null : menu)), 250);
       }),
@@ -762,12 +1133,21 @@ export default function App() {
   useEffect(() => { setLoginsMenu(null); }, [activeId, surface]);
 
   // Links Sleet was launched with; default-browser status and a one-time prompt.
+  // Runs once per launch, even when React mounts effects twice (development).
+  const launchHandled = useRef(false);
   useEffect(() => {
+    if (launchHandled.current) return;
+    launchHandled.current = true;
     void takeLaunchUrls().then((urls) => urls.forEach((url) => void newTab(url)));
     void defaultBrowserStatus().then((status) => {
       setDefaultBrowser(status);
       if (status.supported && !status.isDefault && !settingsRef.current.defaultBrowserPromptDismissed) {
-        window.setTimeout(() => setToasts((items) => [...items, { id: "default-browser", prompt: { kind: "default-browser" }, expiresAt: null }]), 6000);
+        window.setTimeout(() => {
+          if (settingsRef.current.defaultBrowserPromptDismissed) return;
+          setToasts((items) => items.some((item) => item.id === "default-browser")
+            ? items
+            : [...items, { id: "default-browser", prompt: { kind: "default-browser" }, expiresAt: null }]);
+        }, 6000);
       }
     });
   }, []);
@@ -838,6 +1218,11 @@ export default function App() {
       }
       return;
     }
+    if (prompt.kind === "remember-device") {
+      updateSettings({ rememberDevicePromptDismissed: true });
+      if (choice === "turn-on") void vaultSetRemember(true).then(() => showMessage("Sleet won't ask for your master password on this device")).catch((error) => showMessage(vaultError(error)));
+      return;
+    }
     if (prompt.kind === "default-browser") {
       // Either answer ends the prompt for good; Settings keeps the option.
       updateSettings({ defaultBrowserPromptDismissed: true });
@@ -901,8 +1286,14 @@ export default function App() {
     if (event.action === "search-image") void newTab(imageSearchUrl(settingsRef.current.searchEngine, event.url), { nextToActive: true });
   }, [newTab]);
 
-  const handlersRef = useRef({ handleExternalLink, handleCrash, handleFullscreen, addHistory, handleCertError, handleContext, handleDownload, handleDownloadCheck, handleDownloadProgress, handleDownloadState, handleHttpsFailed, handlePermissionRequest, handlePopupBlocked, newTab, recordUrl, setTabs });
-  handlersRef.current = { handleExternalLink, handleCrash, handleFullscreen, addHistory, handleCertError, handleContext, handleDownload, handleDownloadCheck, handleDownloadProgress, handleDownloadState, handleHttpsFailed, handlePermissionRequest, handlePopupBlocked, newTab, recordUrl, setTabs };
+  /** A click inside a docked pane's page makes that tab the active one. */
+  const focusDockedPage = (id: string) => {
+    if (id === activeIdRef.current || !dockShowing || !dockedTabs.includes(id)) return;
+    suppressPageFocus.current = true;
+    setActiveId(id);
+  };
+  const handlersRef = useRef({ adoptTabs, focusDockedPage, handleExternalLink, handleCrash, handleFullscreen, addHistory, handleCertError, handleContext, handleDownload, handleDownloadCheck, handleDownloadProgress, handleDownloadState, handleHttpsFailed, handlePermissionRequest, handlePopupBlocked, newTab, recordUrl, setTabs });
+  handlersRef.current = { adoptTabs, focusDockedPage, handleExternalLink, handleCrash, handleFullscreen, addHistory, handleCertError, handleContext, handleDownload, handleDownloadCheck, handleDownloadProgress, handleDownloadState, handleHttpsFailed, handlePermissionRequest, handlePopupBlocked, newTab, recordUrl, setTabs };
   useEffect(() => {
     let disposed = false;
     let dispose: () => void = () => undefined;
@@ -928,11 +1319,17 @@ export default function App() {
         setAudio((current) => ({ ...current, [id]: { playing, muted } }));
       },
       onContext: (event) => handlersRef.current.handleContext(event),
-      onFavicon: ({ label, icon }) => {
+      onFavicon: ({ label, icon, sharp }) => {
         const id = label.replace(/^page-/, "");
-        const tab = tabsRef.current.find((item) => item.id === id);
-        handlersRef.current.setTabs((items) => items.map((item) => item.id === id ? { ...item, favicon: icon ?? undefined } : item));
-        if (icon && tab && !tab.private) rememberFavicon(tab.url, icon);
+        void (async () => {
+          const tab = tabsRef.current.find((item) => item.id === id);
+          if (!tab) return;
+          // Keep a site's large icon when the engine later reports its 16px one.
+          const remembered = !sharp && !tab.private && hasSharpFavicon(tab.url) ? faviconFor(tab.url) : undefined;
+          const shown = remembered ?? (icon ? await shrinkIcon(icon) : undefined);
+          handlersRef.current.setTabs((items) => items.map((item) => item.id === id ? { ...item, favicon: shown } : item));
+          if (shown && !remembered && !tab.private) rememberFavicon(tab.url, shown, !!sharp);
+        })();
       },
       onOpenUrls: (urls) => urls.forEach((url) => void handlersRef.current.newTab(url)),
       onPopupBlocked: (event) => handlersRef.current.handlePopupBlocked(event),
@@ -953,6 +1350,13 @@ export default function App() {
       onFullscreen: (event) => handlersRef.current.handleFullscreen(event),
       onExternalLink: (event) => handlersRef.current.handleExternalLink(event),
       onCrashed: (event) => handlersRef.current.handleCrash(event),
+      onHistory: ({ label, back, forward }) => {
+        const id = label.replace(/^page-/, "");
+        setPageHistory((current) => current[id]?.back === back && current[id]?.forward === forward ? current : { ...current, [id]: { back, forward } });
+      },
+      onAdoptTabs: (start) => handlersRef.current.adoptTabs(start),
+      onPageFocus: (label) => handlersRef.current.focusDockedPage(label.replace(/^page-/, "")),
+      owns: ownsLabel,
     }).then((unlisten) => {
       if (disposed) unlisten();
       else dispose = unlisten;
@@ -963,70 +1367,88 @@ export default function App() {
   // Show the active page only on the browser surface. Focus moves to the page
   // when it becomes visible, unless a command just moved focus elsewhere.
   const lastShown = useRef<string | null>(null);
+  // Docked: the other panes of the active tab's layout show too. While a tab is
+  // dragged for docking every page hides, so the drop targets drawn by Sleet show.
+  const dockedKey = dockShowing && !dockDrag ? dockedTabs.join(",") : "";
   useEffect(() => {
-    const visibleId = surface === "browser" && !activeIsHome && !activeAsleep ? activeId : null;
+    const visibleId = surface === "browser" && !activeIsHome && !activeAsleep && !dockDrag ? activeId : null;
     const changed = lastShown.current !== visibleId;
     lastShown.current = visibleId;
     const focusPage = changed && !!visibleId && !suppressPageFocus.current;
     suppressPageFocus.current = false;
+    setDockedVisible(dockedKey ? dockedKey.split(",").filter((id) => createdViews.current.has(id)) : []);
     void (async () => {
       await activateView(visibleId, tabKey ? tabKey.split(",") : [], focusPage);
       if (!visibleId && changed) await focusChrome();
     })();
-  }, [activeAsleep, activeId, activeIsHome, surface, tabKey]);
+  }, [activeAsleep, activeId, activeIsHome, surface, tabKey, dockedKey, !!dockDrag]);
+
+  // Password prompts show one at a time as a centered modal; everything else stays a corner toast.
+  const modalToast = toasts.find(isModalPrompt) ?? null;
+  const cornerToasts = toasts.filter((toast) => !isModalPrompt(toast));
 
   // ---- Overlays: palette and toasts drawn above the page webview.
   const overlayTheme = settings.theme === "light" || (settings.theme === "system" && systemLight) ? "light" : "dark";
   const overlayVars = appearanceVars(settings);
   const overlayVarsKey = JSON.stringify(overlayVars);
-  const overlayStateRef = useRef<Record<OverlayKind, unknown>>({ toasts: null, suggest: null, siteinfo: null, tooltip: null, logins: null });
+  const overlayStateRef = useRef<Record<OverlayKind, unknown>>({ toasts: null, suggest: null, siteinfo: null, tooltip: null, logins: null, modal: null, menu: null });
   overlayStateRef.current = {
-    toasts: { kind: "toasts", theme: overlayTheme, vars: overlayVars, toasts, downloads: downloads.filter((item) => toasts.some((toast) => toast.downloadId === item.id)) },
+    toasts: { kind: "toasts", theme: overlayTheme, vars: overlayVars, toasts: cornerToasts, downloads: downloads.filter((item) => cornerToasts.some((toast) => toast.downloadId === item.id)) },
+    modal: { kind: "modal", theme: overlayTheme, vars: overlayVars, toast: modalToast },
     logins: { kind: "logins", theme: overlayTheme, vars: overlayVars, items: loginsMenu?.items ?? [] },
     tooltip: { kind: "tooltip", theme: overlayTheme, vars: overlayVars, text: tooltip?.text ?? "", seq: tooltip?.seq ?? 0 },
     suggest: { kind: "suggest", theme: overlayTheme, vars: overlayVars, items: suggestions, selected: selectedSuggestion },
     siteinfo: { kind: "siteinfo", theme: overlayTheme, vars: overlayVars, open: siteInfoOpen, session: siteInfoSession, info: siteInfo },
+    menu: { kind: "menu", theme: overlayTheme, vars: overlayVars, menu: menuSpec?.spec ?? null },
   };
 
   /** Overlay rectangle in window logical pixels for its reported content size. */
   const overlayBounds = (kind: OverlayKind): ViewBounds => {
-    const zoom = settingsRef.current.appZoom || 1;
+    const zoom = (settingsRef.current.appZoom || 1);
     const size = overlaySizes[kind];
     if (kind === "tooltip") {
-      const width = Math.min(size?.width ?? 200, 340);
-      const height = size?.height ?? 28;
+      const width = Math.min(size?.width ?? 250, 425);
+      const height = size?.height ?? 35;
       const { left, top } = tooltipPosition(tooltip ?? { x: 0, y: 0 }, width, height);
       return { x: Math.round(left * zoom), y: Math.round(top * zoom), width: Math.round(width * zoom), height: Math.round(height * zoom) };
     }
     if (kind === "logins") {
       // Anchor is already in window logical pixels.
       const anchor = loginsMenu?.anchor ?? { x: 0, y: 0, width: 280 };
-      const width = Math.max(anchor.width, 280 * zoom);
-      const height = (size?.height ?? 120) * zoom;
-      const x = Math.min(anchor.x, window.innerWidth * zoom - width - 8);
-      const y = anchor.y + height > window.innerHeight * zoom - 8 ? Math.max(8, anchor.y - height - 40 * zoom) : anchor.y;
+      const width = Math.max(anchor.width, 350 * zoom);
+      const height = (size?.height ?? 150) * zoom;
+      const x = Math.min(anchor.x, window.innerWidth * zoom - width - 10);
+      const y = anchor.y + height > window.innerHeight * zoom - 10 ? Math.max(10, anchor.y - height - 50 * zoom) : anchor.y;
       return { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) };
     }
     if (kind === "siteinfo") {
       const field = document.querySelector<HTMLElement>(".address")?.getBoundingClientRect();
-      const x = (field?.left ?? sidebarWidth + 120) - 2;
-      const y = (field?.bottom ?? 44) + 6;
-      const height = Math.min(size?.height ?? 420, window.innerHeight - y - 16);
-      return { x: Math.round(x * zoom), y: Math.round(y * zoom), width: Math.round(340 * zoom), height: Math.round(height * zoom) };
+      const x = (field?.left ?? sidebarShown + 120) - 2;
+      const y = (field?.bottom ?? toolbarHeight()) + 8;
+      const height = Math.min(size?.height ?? 525, window.innerHeight - y - 20);
+      return { x: Math.round(x * zoom), y: Math.round(y * zoom), width: Math.round(425 * zoom), height: Math.round(height * zoom) };
+    }
+    if (kind === "menu") {
+      // The whole window: menus and their submenus can open anywhere; a click off them closes them.
+      return { x: 0, y: 0, width: Math.round(window.innerWidth * zoom), height: Math.round(window.innerHeight * zoom) };
+    }
+    if (kind === "modal") {
+      // The whole page area: the backdrop dims it and the dialog sits in its middle.
+      return getBounds() ?? { x: Math.round(sidebarShown * zoom), y: Math.round(toolbarHeight() * zoom), width: Math.round((window.innerWidth - sidebarShown) * zoom), height: Math.round((window.innerHeight - toolbarHeight()) * zoom) };
     }
     if (kind === "suggest") {
-      const field = document.querySelector<HTMLElement>(".address")?.getBoundingClientRect();
-      const x = field?.left ?? sidebarWidth + 120;
-      const y = (field?.bottom ?? 44) + 4;
-      const width = field?.width ?? 600;
-      const height = Math.min(size?.height ?? 300, window.innerHeight - y - 16);
+      const field = document.querySelector<HTMLElement>(suggestAnchor === "home" ? ".home-search" : ".address")?.getBoundingClientRect();
+      const x = field?.left ?? sidebarShown + 120;
+      const y = (field?.bottom ?? toolbarHeight()) + 5;
+      const width = field?.width ?? 750;
+      const height = Math.min(size?.height ?? 375, window.innerHeight - y - 20);
       return { x: Math.round(x * zoom), y: Math.round(y * zoom), width: Math.round(width * zoom), height: Math.round(height * zoom) };
     }
-    const width = Math.round(300 * Math.min(1.6, settings.textSize * (settings.textAreas.toasts ?? 1)));
-    const height = size?.height ?? 64;
+    const width = Math.round(375 * Math.min(1.6, settings.textSize * (settings.textAreas.toasts ?? 1)));
+    const height = size?.height ?? 80;
     const position = settings.toastPosition;
-    const x = position.endsWith("right") ? window.innerWidth - width - 12 : sidebarWidth + 10;
-    const y = position.startsWith("bottom") ? window.innerHeight - height - 12 : 52 + 10;
+    const x = position.endsWith("right") ? window.innerWidth - width - 15 : sidebarShown + 12;
+    const y = position.startsWith("bottom") ? window.innerHeight - height - 15 : toolbarHeight() + 12;
     return { x: Math.round(x * zoom), y: Math.round(y * zoom), width: Math.round(width * zoom), height: Math.round(height * zoom) };
   };
 
@@ -1043,8 +1465,8 @@ export default function App() {
   const showRenderedTooltip = (rendered: OverlayRendered) => {
     const current = tooltipRef.current;
     if (!current || rendered.seq !== current.seq) return;
-    const zoom = settingsRef.current.appZoom || 1;
-    const width = Math.min(rendered.width, 340);
+    const zoom = (settingsRef.current.appZoom || 1);
+    const width = Math.min(rendered.width, 425);
     const { left, top } = tooltipPosition(current, width, rendered.height);
     void overlayShow(overlayLabel("tooltip"), "tooltip", {
       x: Math.round(left * zoom), y: Math.round(top * zoom), width: Math.round(width * zoom), height: Math.round(rendered.height * zoom),
@@ -1053,11 +1475,52 @@ export default function App() {
   const showRenderedTooltipRef = useRef(showRenderedTooltip);
   showRenderedTooltipRef.current = showRenderedTooltip;
 
-  const toastsVisible = toasts.length > 0;
+  // Context menu: drawn on the full-window "menu" overlay above the pages.
+  const menuOpen = !!menuSpec;
+  const menuWasOpen = useRef(false);
+  // Resizing the window closes a menu (its layer was sized to the old window).
+  useEffect(() => {
+    if (!menuOpen) return;
+    const close = () => setMenu(null);
+    window.addEventListener("resize", close);
+    return () => window.removeEventListener("resize", close);
+  }, [menuOpen]);
+  useEffect(() => {
+    if (!isTauri()) return;
+    void emitEvent(OVERLAY_EVENTS.state, overlayStateRef.current.menu);
+    if (menuOpen) {
+      menuWasOpen.current = true;
+      void overlayShow(overlayLabel("menu"), "menu", overlayBounds("menu"), true, (settings.appZoom || 1));
+      return;
+    }
+    void overlayHide(overlayLabel("menu"));
+    if (menuWasOpen.current) { menuWasOpen.current = false; void focusChrome(); }
+  }, [menuSpec]);
+
+  const toastsVisible = cornerToasts.length > 0;
+  const modalId = modalToast?.id ?? null;
+  useEffect(() => {
+    if (!isTauri()) return;
+    void emitEvent(OVERLAY_EVENTS.state, overlayStateRef.current.modal);
+    // Focused, so Enter and Esc reach the dialog.
+    if (modalId) { void overlayShow(overlayLabel("modal"), "modal", overlayBounds("modal"), true, (settings.appZoom || 1)); return; }
+    void overlayHide(overlayLabel("modal")).then(() => {
+      // Hand the keyboard back to the page the dialog covered.
+      const id = activeIdRef.current;
+      if (surfaceRef.current === "browser" && createdViews.current.has(id)) void activateView(id, tabsRef.current.map((tab) => tab.id), true);
+    });
+  }, [modalId]);
+  useEffect(() => {
+    if (!isTauri() || !modalId) return;
+    const place = () => void overlayPlace(overlayLabel("modal"), overlayBounds("modal"));
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  }, [modalId, overlayTheme, overlayVarsKey, settings.appZoom, sidebarShown, find.open]);
   useEffect(() => {
     if (!isTauri()) return;
     void emitEvent(OVERLAY_EVENTS.state, overlayStateRef.current.toasts);
-    if (toastsVisible) void overlayShow(overlayLabel("toasts"), "toasts", overlayBounds("toasts"), false, settings.appZoom);
+    if (toastsVisible) void overlayShow(overlayLabel("toasts"), "toasts", overlayBounds("toasts"), false, (settings.appZoom || 1));
     else void overlayHide(overlayLabel("toasts"));
   }, [toastsVisible]);
 
@@ -1065,12 +1528,12 @@ export default function App() {
     if (!isTauri()) return;
     void emitEvent(OVERLAY_EVENTS.state, overlayStateRef.current.toasts);
     if (toastsVisible) void overlayPlace(overlayLabel("toasts"), overlayBounds("toasts"));
-  }, [toasts, downloads, overlayTheme, overlayVarsKey, settings.toastPosition, overlaySizes.toasts?.height, settings.appZoom, sidebarWidth]);
+  }, [cornerToasts, downloads, overlayTheme, overlayVarsKey, settings.toastPosition, overlaySizes.toasts?.height, settings.appZoom, sidebarShown]);
 
   useEffect(() => {
     if (!isTauri()) return;
     void emitEvent(OVERLAY_EVENTS.state, overlayStateRef.current.siteinfo);
-    if (siteInfoOpen) void overlayShow(overlayLabel("siteinfo"), "siteinfo", overlayBounds("siteinfo"), true, settings.appZoom);
+    if (siteInfoOpen) void overlayShow(overlayLabel("siteinfo"), "siteinfo", overlayBounds("siteinfo"), true, (settings.appZoom || 1));
     else void overlayHide(overlayLabel("siteinfo"));
   }, [siteInfoOpen, siteInfoSession]);
 
@@ -1078,13 +1541,13 @@ export default function App() {
     if (!isTauri()) return;
     void emitEvent(OVERLAY_EVENTS.state, overlayStateRef.current.siteinfo);
     if (siteInfoOpen) void overlayPlace(overlayLabel("siteinfo"), overlayBounds("siteinfo"));
-  }, [sitePermissions, activeTab?.certError, overlayTheme, overlayVarsKey, overlaySizes.siteinfo?.height, settings.appZoom, sidebarWidth]);
+  }, [sitePermissions, activeTab?.certError, overlayTheme, overlayVarsKey, overlaySizes.siteinfo?.height, settings.appZoom, sidebarShown]);
 
   const loginsVisible = !!loginsMenu && loginsMenu.items.length > 0;
   useEffect(() => {
     if (!isTauri()) return;
     void emitEvent(OVERLAY_EVENTS.state, overlayStateRef.current.logins);
-    if (loginsVisible) void overlayShow(overlayLabel("logins"), "logins", overlayBounds("logins"), false, settings.appZoom);
+    if (loginsVisible) void overlayShow(overlayLabel("logins"), "logins", overlayBounds("logins"), false, (settings.appZoom || 1));
     else void overlayHide(overlayLabel("logins"));
   }, [loginsVisible]);
   useEffect(() => {
@@ -1097,7 +1560,7 @@ export default function App() {
   useEffect(() => {
     if (!isTauri()) return;
     void emitEvent(OVERLAY_EVENTS.state, overlayStateRef.current.suggest);
-    if (suggestVisible) void overlayShow(overlayLabel("suggest"), "suggest", overlayBounds("suggest"), false, settings.appZoom);
+    if (suggestVisible) void overlayShow(overlayLabel("suggest"), "suggest", overlayBounds("suggest"), false, (settings.appZoom || 1));
     else void overlayHide(overlayLabel("suggest"));
   }, [suggestVisible]);
 
@@ -1105,7 +1568,7 @@ export default function App() {
     if (!isTauri()) return;
     void emitEvent(OVERLAY_EVENTS.state, overlayStateRef.current.suggest);
     if (suggestVisible) void overlayPlace(overlayLabel("suggest"), overlayBounds("suggest"));
-  }, [suggestions, selectedSuggestion, overlayTheme, overlayVarsKey, overlaySizes.suggest?.height, settings.appZoom, sidebarWidth]);
+  }, [suggestions, selectedSuggestion, suggestAnchor, overlayTheme, overlayVarsKey, overlaySizes.suggest?.height, settings.appZoom, sidebarShown]);
 
   // Overlay messages: ready (resend state), size, and user actions.
   const overlayActionRef = useRef<(action: OverlayAction) => void>(() => undefined);
@@ -1123,9 +1586,16 @@ export default function App() {
       const download = downloadsRef.current.find((item) => item.id === action.id);
       if (download) cancelDownload(download);
     }
-    if (action.kind === "toasts" && action.type === "resolve-check") resolveCheck(action.check, action.keep);
+    if (action.kind === "toasts" && action.type === "resolve-check") resolveCheck(action.check, action.keep, action.remember);
     if (action.kind === "toasts" && action.type === "prompt") answerPrompt(action.toast, action.choice);
     if (action.kind === "toasts" && action.type === "hover") holdToast(action.id, action.hovering);
+    if (action.kind === "toasts" && action.type === "show-downloads") setSurface("downloads");
+    if (action.kind === "menu" && action.type === "pick") runMenuItem(action.id);
+    if (action.kind === "menu" && action.type === "close") setMenu(null);
+    if (action.kind === "toasts" && action.type === "pause-download") {
+      const download = downloadsRef.current.find((item) => item.id === action.id);
+      if (download) togglePauseDownload(download);
+    }
     if (action.kind === "toasts" && action.type === "open-download") {
       const download = downloadsRef.current.find((item) => item.id === action.id);
       if (download) openDownload(download);
@@ -1144,11 +1614,13 @@ export default function App() {
       listenEvent<OverlayAction>(OVERLAY_EVENTS.action, ({ payload }) => overlayActionRef.current(payload)),
       listenEvent<OverlayRendered>(OVERLAY_EVENTS.rendered, ({ payload }) => { if (payload.kind === "tooltip") showRenderedTooltipRef.current(payload); }),
     ];
-    // Warm both overlays off-screen so the first palette/toast appears instantly.
+    // Warm the frequent overlays off-screen so the first suggestion/toast/tooltip appears instantly.
     const offscreen = { x: -4000, y: -4000, width: 10, height: 10 };
     void (async () => {
-      for (const kind of ["toasts", "suggest", "siteinfo", "tooltip", "logins"] as OverlayKind[]) {
-        await overlayShow(overlayLabel(kind), kind, offscreen, false, settingsRef.current.appZoom);
+      // Only the frequent overlays; the rest are created when first shown (see RARE_OVERLAYS).
+      // The menu layer is kept ready too, so a right-click shows its menu at once.
+      for (const kind of ["toasts", "suggest", "tooltip", "menu"] as OverlayKind[]) {
+        await overlayShow(overlayLabel(kind), kind, offscreen, false, (settingsRef.current.appZoom || 1));
         await overlayHide(overlayLabel(kind));
       }
     })();
@@ -1283,17 +1755,27 @@ export default function App() {
     applyVars(appearanceVars(settings));
   }, [settings.density, settings.reducedMotion, settings.theme, settings.textSize, settings.textAreas, systemLight]);
 
-  useEffect(() => { void setChromeZoom(settings.appZoom); }, [settings.appZoom]);
+  useEffect(() => { void setChromeZoom((settings.appZoom || 1)); }, [settings.appZoom]);
 
   useEffect(() => {
     void setPrivacyOptions({ httpsOnly: settings.httpsOnly, blockPopups: settings.blockPopups, trackingPrevention: settings.trackingPrevention });
   }, [settings.blockPopups, settings.httpsOnly, settings.trackingPrevention]);
 
-  // "Clear when Sleet closes": runs before the window goes away.
+  useEffect(() => { void setDownloadAsk(settings.downloadAsk).catch(() => undefined); }, [settings.downloadAsk]);
+
+  // Closing a window. With other windows still open, this window's tabs go
+  // with it; closing the last one quits Sleet, keeping its tabs for next time
+  // and running "Clear when Sleet closes".
   useEffect(() => {
     if (!isTauri()) return;
     let stop: (() => void) | undefined;
     void getCurrentWindow().onCloseRequested(async () => {
+      const others = (await listWindows()).filter((item) => item.label !== WINDOW_LABEL);
+      if (others.length > 0) {
+        forgetSession(WINDOW_LABEL);
+        await kvFlush();
+        return;
+      }
       const { clearHistoryOnExit, clearSiteDataOnExit } = settingsRef.current;
       const work: Promise<unknown>[] = [kvFlush()];
       if (clearHistoryOnExit) work.push(store.historyClear());
@@ -1302,6 +1784,51 @@ export default function App() {
     }).then((unlisten) => { stop = unlisten; });
     return () => stop?.();
   }, []);
+
+  // The engine's own menu (Back, Reload, Inspect…) never shows on Sleet's interface;
+  // text fields keep it for cut, copy and paste.
+  useEffect(() => {
+    const block = (event: MouseEvent) => {
+      if (!(event.target as HTMLElement | null)?.closest?.("input, textarea, [contenteditable='true']")) event.preventDefault();
+    };
+    window.addEventListener("contextmenu", block);
+    return () => window.removeEventListener("contextmenu", block);
+  }, []);
+
+  // ---- Windows
+  // The main window brings back the windows open when Sleet last closed.
+  useEffect(() => {
+    if (!IS_MAIN_WINDOW) return;
+    windowsToReopen().forEach((label) => void openWindow({ label }).catch(() => undefined));
+  }, []);
+
+  // The window title follows the active tab (taskbar, and "Move to window" in other windows).
+  const windowTitle = activeTab ? `${activeTab.private ? "Private · " : ""}${activeTab.title || pageTitle(activeTab.url)} — Sleet` : "Sleet";
+  useEffect(() => {
+    document.title = windowTitle;
+    if (isTauri()) void getCurrentWindow().setTitle(windowTitle).catch(() => undefined);
+  }, [windowTitle]);
+
+  // Other windows, for "Move to window" (refreshed whenever this window comes forward or one opens/closes).
+  useEffect(() => {
+    if (!isTauri()) return;
+    const refresh = () => void listWindows().then((all) => setOtherWindows(all.filter((item) => item.label !== WINDOW_LABEL)));
+    refresh();
+    window.addEventListener("focus", refresh);
+    const stop = listenEvent("sleet-windows-changed", refresh);
+    return () => { window.removeEventListener("focus", refresh); void stop.then((fn) => fn()); };
+  }, []);
+
+  /** A tab dragged out of the sidebar: onto another Sleet window, or into a new one where it was dropped. */
+  const tearOffTab = useCallback(async (id: string, screenX: number, screenY: number) => {
+    const scale = window.devicePixelRatio || 1;
+    const [x, y] = [screenX * scale, screenY * scale];
+    const target = await windowAt(x, y);
+    if (target) { void moveTabsToOtherWindow([id], target); return; }
+    if (tabsRef.current.length < 2) return;
+    // Put the new window's sidebar under the pointer.
+    void moveTabsToOtherWindow([id], null, [Math.max(0, x - 120 * scale), Math.max(0, y - 90 * scale)]);
+  }, [moveTabsToOtherWindow]);
 
   // New default zoom applies to every tab without its own zoom.
   useEffect(() => {
@@ -1356,21 +1883,40 @@ export default function App() {
   const openUrl = (url: string) => { void newTab(url); };
 
   // ---- Bookmarks (grid at the top of the sidebar)
-  const activeBookmark = activeTab && !isHomeUrl(activeTab.url) && !activeTab.private ? findByUrl(bookmarks, activeTab.url) : undefined;
+  /**
+   * The bookmark a tab belongs to: the one it was opened from (it stays tied
+   * while you browse within the site, e.g. YouTube home → a video), else one
+   * for the exact page.
+   */
+  const tabBookmark = (tab: BrowserTab | undefined, tree = bookmarks): Bookmark | undefined => {
+    if (!tab || isHomeUrl(tab.url) || tab.private) return undefined;
+    const tied = tab.bookmarkId ? findBookmark(tree, tab.bookmarkId)?.node : undefined;
+    return (tied?.kind === "link" ? tied : undefined) ?? findByUrl(tree, tab.url);
+  };
+  const activeBookmark = tabBookmark(activeTab);
 
   /** Adds or removes a bookmark for a tab (Ctrl+D / the star). */
   const toggleTabBookmark = (tab: BrowserTab | undefined) => {
-    if (!tab || isHomeUrl(tab.url)) return;
-    const existing = findByUrl(bookmarks, tab.url);
+    if (!tab || isHomeUrl(tab.url) || tab.private) return;
+    const existing = tabBookmark(tab);
     if (existing) {
       setBookmarks((tree) => removeBookmark(tree, existing.id));
+      setTabs((items) => items.map((item) => item.bookmarkId === existing.id ? { ...item, bookmarkId: undefined } : item));
+      showMessage(`Removed “${existing.title}” from bookmarks`);
       return;
     }
-    const next = addBookmark(bookmarks, { title: tab.title || pageTitle(tab.url), url: tab.url });
-    const created = next[next.length - 1];
-    setBookmarks(next);
+    const created: Bookmark = { id: makeBookmarkId(), kind: "link", title: tab.title || pageTitle(tab.url), url: tab.url };
+    // Never add the same page twice, even if the star is clicked again before the list updates.
+    setBookmarks((tree) => findByUrl(tree, tab.url) ? tree : insertBookmark(tree, created));
     setTabs((items) => items.map((item) => item.id === tab.id ? { ...item, bookmarkId: created.id } : item));
   };
+
+  // Tabs tied to a bookmark that's gone (removed elsewhere) drop the tie.
+  useEffect(() => {
+    setTabs((items) => items.some((tab) => tab.bookmarkId && !findBookmark(bookmarks, tab.bookmarkId))
+      ? items.map((tab) => tab.bookmarkId && !findBookmark(bookmarks, tab.bookmarkId) ? { ...tab, bookmarkId: undefined } : tab)
+      : items);
+  }, [bookmarks, setTabs]);
   const toggleBookmarkRef = useRef(() => undefined as void);
   toggleBookmarkRef.current = () => toggleTabBookmark(tabsRef.current.find((tab) => tab.id === activeIdRef.current));
 
@@ -1497,30 +2043,80 @@ export default function App() {
   pickSuggestionRef.current = pickItem;
   dismissToastRef.current = dismissToast;
   pickLoginRef.current = (item) => pickLogin(item);
-  const showMenu = (x: number, y: number, items: MenuEntry[], inSidebar = false) => setMenu({ x, y, items, maxX: inSidebar ? sidebarWidth : undefined });
+  const showMenu = (x: number, y: number, items: MenuEntry[]) => setMenu({ x, y, items });
 
   const tabMenu = (tab: BrowserTab, index: number): MenuEntry[] => {
     const sound = audio[tab.id];
     const isHome = isHomeUrl(tab.url);
+    const canDockBeside = tab.id !== activeId && !isHome && !!activeTab && !isHomeUrl(activeTab.url) && surface === "browser";
+    const windowName = (other: WindowInfo) => other.title && other.title !== "Sleet" ? `“${other.title.replace(/ — Sleet$/, "")}”` : "Other window";
     return [
-      { label: "New tab below", key: "n", onSelect: () => void newTab(undefined, { nextToActive: tab.id === activeId }) },
-      { label: "New private tab", key: "p", onSelect: () => void newTab(undefined, { private: true, focusAddress: true }) },
-      { label: "Reopen closed tab", key: "z", onSelect: () => void reopenClosedTab(), disabled: closedTabs.current.length === 0 },
-      "separator",
       { label: "Reload", key: "r", onSelect: () => reloadTab(tab.id), disabled: isHome },
       { label: "Duplicate", key: "d", onSelect: () => void newTab(tab.url, { nextToActive: tab.id === activeId }), disabled: isHome },
       { label: sound?.muted ? "Unmute tab" : "Mute tab", key: "m", onSelect: () => toggleMute(tab.id), disabled: !createdViews.current.has(tab.id) },
       { label: "Copy link", key: "c", onSelect: () => copyText(tab.url), disabled: isHome },
-      { label: findByUrl(bookmarks, tab.url) ? "Remove bookmark" : "Bookmark tab", key: "s", onSelect: () => toggleTabBookmark(tab), disabled: isHome || tab.private },
+      { label: tabBookmark(tab) ? "Remove bookmark" : "Bookmark tab", key: "s", onSelect: () => toggleTabBookmark(tab), disabled: isHome || tab.private },
+      "separator",
+      { label: "Reopen closed tab", key: "z", onSelect: () => void reopenClosedTab(), disabled: closedTabs.current.length === 0 },
+      { label: "Group", key: "g", submenu: [
+        { label: "New group", key: "n", onSelect: () => groupTabs([tab.id], null) },
+        ...tabGroups.filter((group) => group.id !== tab.groupId).map((group) => ({ label: group.name, onSelect: () => groupTabs([tab.id], group.id) })),
+        ...(tab.groupId ? ["separator" as const, { label: "Remove from group", key: "x", onSelect: () => ungroupTabs([tab.id]) }] : []),
+      ] },
+      { label: "Dock", key: "k", disabled: !canDockBeside && !dockedIds.has(tab.id), submenu: [
+        { label: "Beside current tab, right", key: "r", disabled: !canDockBeside, onSelect: () => activeTab && dockTabNextTo(tab.id, activeTab.id, "right") },
+        { label: "Beside current tab, left", key: "l", disabled: !canDockBeside, onSelect: () => activeTab && dockTabNextTo(tab.id, activeTab.id, "left") },
+        { label: "Above current tab", key: "t", disabled: !canDockBeside, onSelect: () => activeTab && dockTabNextTo(tab.id, activeTab.id, "top") },
+        { label: "Below current tab", key: "b", disabled: !canDockBeside, onSelect: () => activeTab && dockTabNextTo(tab.id, activeTab.id, "bottom") },
+        ...(dockedIds.has(tab.id) ? ["separator" as const, { label: "Undock", key: "u", onSelect: () => undockTab(tab.id) }] : []),
+      ] },
+      { label: "Move", key: "v", submenu: [
+        { label: "Up", key: "k", onSelect: () => reorderTab(tab.id, index - 1), disabled: index === 0 },
+        { label: "Down", key: "j", onSelect: () => reorderTab(tab.id, index + 2), disabled: index === tabs.length - 1 },
+        "separator",
+        { label: "New window", key: "e", onSelect: () => void moveTabsToOtherWindow([tab.id], null), disabled: tabs.length < 2 },
+        ...otherWindows.map((other) => ({ label: windowName(other), onSelect: () => void moveTabsToOtherWindow([tab.id], other.label) })),
+      ] },
+      "separator",
       { label: "Unload tab", key: "u", onSelect: () => unloadTab(tab.id), disabled: tab.id === activeId || !createdViews.current.has(tab.id) },
-      "separator",
-      { label: "Move up", key: "k", onSelect: () => reorderTab(tab.id, index - 1), disabled: index === 0 },
-      { label: "Move down", key: "j", onSelect: () => reorderTab(tab.id, index + 2), disabled: index === tabs.length - 1 },
-      "separator",
       { label: "Close", key: "w", onSelect: () => void closeTab(tab.id) },
-      { label: "Close other tabs", key: "o", onSelect: () => void closeTabs(tabs.filter((item) => item.id !== tab.id).map((item) => item.id)), disabled: tabs.length < 2 },
-      { label: "Close tabs above", key: "a", onSelect: () => void closeTabs(tabs.slice(0, index).map((item) => item.id)), disabled: index === 0 },
-      { label: "Close tabs below", key: "b", onSelect: () => void closeTabs(tabs.slice(index + 1).map((item) => item.id)), disabled: index === tabs.length - 1 },
+      { label: "Close more", key: "o", disabled: tabs.length < 2, submenu: [
+        { label: "Other tabs", key: "o", onSelect: () => void closeTabs(tabs.filter((item) => item.id !== tab.id).map((item) => item.id)), disabled: tabs.length < 2 },
+        { label: "Tabs above", key: "a", onSelect: () => void closeTabs(tabs.slice(0, index).map((item) => item.id)), disabled: index === 0 },
+        { label: "Tabs below", key: "b", onSelect: () => void closeTabs(tabs.slice(index + 1).map((item) => item.id)), disabled: index === tabs.length - 1 },
+      ] },
+    ];
+  };
+
+  /** Right-click on the sidebar's empty space. */
+  const sidebarMenu = (): MenuEntry[] => {
+    const anyOpen = tabGroups.some((group) => !group.collapsed);
+    return [
+      { label: "New tab", key: "t", onSelect: () => void newTab(undefined, { focusAddress: true }) },
+      { label: "New private tab", key: "p", onSelect: () => void newTab(undefined, { private: true, focusAddress: true }) },
+      { label: "New window", key: "n", onSelect: newWindow },
+      { label: "Reopen closed tab", key: "z", onSelect: () => void reopenClosedTab(), disabled: closedTabs.current.length === 0 },
+      ...(tabGroups.length > 0 ? [
+        "separator" as const,
+        { label: anyOpen ? "Collapse all groups" : "Expand all groups", key: "c", onSelect: () => setTabGroups((groups) => groups.map((group) => ({ ...group, collapsed: anyOpen }))) },
+      ] : []),
+      "separator",
+      { label: bookmarksCollapsed ? "Show bookmarks" : "Fold bookmarks", key: "b", onSelect: () => setBookmarksCollapsed((collapsed) => !collapsed) },
+      { label: "Hide sidebar", key: "h", onSelect: () => setSidebarHidden(true) },
+    ];
+  };
+
+  const groupMenu = (group: TabGroup): MenuEntry[] => {
+    const members = tabs.filter((tab) => tab.groupId === group.id).map((tab) => tab.id);
+    return [
+      { label: "New tab in group", key: "n", onSelect: () => {
+        void newTab(undefined, { focusAddress: true }).then((id) => groupTabs([id], group.id));
+      } },
+      { label: "Edit…", key: "e", onSelect: () => setEditingGroup(group.id) },
+      { label: group.collapsed ? "Expand" : "Collapse", key: "c", onSelect: () => updateGroup(group.id, { collapsed: !group.collapsed }) },
+      "separator",
+      { label: "Ungroup", key: "u", onSelect: () => ungroupTabs(members) },
+      { label: "Close group", key: "w", danger: true, onSelect: () => void closeTabs(members) },
     ];
   };
 
@@ -1539,10 +2135,17 @@ export default function App() {
     } },
   ];
 
-  const downloadMenu = (download: DownloadItem): MenuEntry[] => [
+  const downloadMenu = (download: DownloadItem): MenuEntry[] => {
+    const extension = extensionOf(download.filename);
+    const autoOpen = canAutoOpen(extension)
+      ? [{ label: settings.autoOpenTypes.includes(extension) ? `Stop always opening .${extension} files` : `Always open .${extension} files`, key: "l", onSelect: () => toggleAutoOpen(download) }]
+      : [];
+    return [
     { label: "Open file", key: "o", onSelect: () => openDownload(download), disabled: download.status !== "complete" },
+    ...(download.status === "active" ? [{ label: download.paused ? "Resume" : "Pause", key: "p", onSelect: () => togglePauseDownload(download) }] : []),
     { label: "Cancel download", key: "x", onSelect: () => cancelDownload(download), disabled: download.status !== "active" },
     { label: "Show in folder", key: "f", onSelect: () => revealDownload(download), disabled: download.status !== "complete" },
+    ...autoOpen,
     "separator",
     { label: "Copy download link", key: "c", onSelect: () => copyText(download.url) },
     { label: "Download again", key: "a", onSelect: () => {
@@ -1555,7 +2158,8 @@ export default function App() {
       void store.downloadDelete(download.id).then(() => setDownloads((items) => items.filter((item) => item.id !== download.id)))
         .catch((error) => showMessage(String(error)));
     } },
-  ];
+    ];
+  };
   // ---- Find in page, print, full screen, loading, crashes
   const activeHasPage = () => {
     const id = activeIdRef.current;
@@ -1640,6 +2244,7 @@ export default function App() {
     if (command === "find") { void openFind(); return true; }
     if (command === "find-next" || command === "find-previous") { stepFind(command === "find-previous"); return true; }
     if (command === "print") { void printActive(); return true; }
+    if (command === "toggle-sidebar") { setSidebarHidden((hidden) => !hidden); return true; }
     if (command === "clear-data") { openSettings("privacy"); setClearRequest((count) => count + 1); return true; }
     return false;
   };
@@ -1659,14 +2264,23 @@ export default function App() {
   }, [windowFullscreen, showMessage]);
 
   const activeCrash = activeTab ? crashed[activeTab.id] : undefined;
+  // Back/Forward work if the page's own history can move, or Sleet's saved history for the tab can
+  // (the same two sources goHistory uses, in the same order).
+  const enginePageHistory = activeTab && createdViews.current.has(activeTab.id) && !savedHistoryTabs.current.has(activeTab.id) && !isHomeUrl(activeTab.url)
+    ? pageHistory[activeTab.id] : undefined;
+  const canGoBack = !!enginePageHistory?.back || !!neighbour(activeTab?.nav, true);
+  const canGoForward = !!enginePageHistory?.forward || !!neighbour(activeTab?.nav, false);
   const activeLoading = !!activeTab && loadingTabs.has(activeTab.id) && !activeIsHome;
 
   const searchName = SEARCH_ENGINES[settings.searchEngine]?.name ?? "the web";
   const zoomShown = activeTab && !activeIsHome && activeTab.zoom !== undefined ? activeTab.zoom : undefined;
 
   return (
-    <div className={`app-shell ${immersive ? "is-immersive" : ""}`} style={{ "--sidebar": `${sidebarWidth}px` } as CSSProperties}>
+    <div className={`app-shell ${immersive ? "is-immersive" : ""} ${sidebarHidden ? "is-sidebar-hidden" : ""}`} style={{ "--sidebar": `${sidebarWidth}px` } as CSSProperties}>
       <TabSidebar
+        bookmarksCollapsed={bookmarksCollapsed}
+        onToggleBookmarks={() => setBookmarksCollapsed((collapsed) => !collapsed)}
+        bookmarkCount={allLinks(bookmarks).length}
         bookmarks={(
           <BookmarkGrid
             bookmarks={bookmarks}
@@ -1685,7 +2299,7 @@ export default function App() {
               }
             }}
             onEditFolder={(folder) => setEditingBookmark(folder)}
-            onContextMenu={(x, y, bookmark) => showMenu(x, y, bookmarkMenu(bookmark), true)}
+            onContextMenu={(x, y, bookmark) => showMenu(x, y, bookmarkMenu(bookmark))}
           />
         )}
         bookmarkEditor={editingBookmark && (
@@ -1696,9 +2310,27 @@ export default function App() {
             onColor={(color) => setBookmarks((tree) => updateBookmark(tree, editingBookmark.id, { color }))}
           />
         )}
+        onTearOffTab={(id, x, y) => void tearOffTab(id, x, y)}
+        groups={tabGroups}
+        editingGroup={editingGroup}
+        onToggleGroup={(id) => { const group = tabGroups.find((item) => item.id === id); if (group) updateGroup(id, { collapsed: !group.collapsed }); }}
+        onRenameGroup={(id, name) => { if (name?.trim()) updateGroup(id, { name: name.trim() }); setEditingGroup(null); }}
+        onGroupColor={(id, color) => updateGroup(id, { color })}
+        onGroupWith={(tabId, targetId) => {
+          // Into the other tab's group, or a new group for the two of them.
+          const target = tabsRef.current.find((tab) => tab.id === targetId);
+          if (target?.groupId) groupTabs([tabId], target.groupId);
+          else groupTabs([targetId, tabId], null);
+        }}
+        onEditGroup={setEditingGroup}
+        dockedIds={dockedIds}
+        onDockDrag={(id, x, y) => { if (id) dockDragMove(id, "sidebar", x, y); else dockDragLeave(); }}
+        onDockDrop={(x, y) => dockDragEnd(x, y)}
+        groupMenu={groupMenu}
+        sidebarMenu={sidebarMenu}
         onBookmarkTab={(id) => {
           const tab = tabsRef.current.find((item) => item.id === id);
-          if (tab && !tab.private && !isHomeUrl(tab.url) && !findByUrl(bookmarks, tab.url)) toggleTabBookmark(tab);
+          if (tab && !tab.private && !isHomeUrl(tab.url) && !tabBookmark(tab)) toggleTabBookmark(tab);
         }}
         tabs={tabs}
         history={history}
@@ -1716,7 +2348,7 @@ export default function App() {
         onClose={(id) => void closeTab(id)}
         onReorder={reorderTab}
         onToggleMute={toggleMute}
-        onContextMenu={(x, y, items) => showMenu(x, y, items, true)}
+        onContextMenu={(x, y, items) => showMenu(x, y, items)}
         tabMenu={tabMenu}
         historyMenu={historyMenu}
         downloadMenu={downloadMenu}
@@ -1727,6 +2359,7 @@ export default function App() {
         onRevealDownload={revealDownload}
         onSurfaceChange={(next) => next === "settings" ? openSettings() : setSurface(next)}
         sidebarWidth={sidebarWidth}
+        onHideSidebar={() => setSidebarHidden(true)}
         onSidebarResize={(width) => setSidebarWidth(clampSidebarWidth(width))}
       />
       <section className="main-stage">
@@ -1739,6 +2372,12 @@ export default function App() {
           onToggleBookmark={() => toggleTabBookmark(activeTab)}
           onNavigate={(value) => void navigate(value)}
           loading={activeLoading}
+          canGoBack={canGoBack}
+          canGoForward={canGoForward}
+          sidebarHidden={sidebarHidden}
+          onShowSidebar={() => setSidebarHidden(false)}
+          downloads={downloads}
+          onOpenDownloads={() => setSurface("downloads")}
           onAction={(action) => {
             if (action === "back" || action === "forward") void goHistory(action === "back");
             else if (action === "stop") { if (activeTab) stopTab(activeTab.id); }
@@ -1747,12 +2386,12 @@ export default function App() {
           onMore={() => void openPalette()}
           suggestions={suggestions}
           selectedSuggestion={selectedSuggestion}
-          onAddressInput={onAddressInput}
+          onAddressInput={(text) => { if (text !== null) setSuggestAnchor("address"); onAddressInput(text); }}
           onSelectSuggestion={setSelectedSuggestion}
           onPickSuggestion={pickSuggestion}
           commandMode={commandMode}
           onOpenSiteInfo={() => (siteInfoOpen ? closeSiteInfo(true) : openSiteInfo())}
-          logins={activeTab && !isHomeUrl(activeTab.url) && vault?.exists && (pageLogins.length > 0 || !vault.unlocked) ? { count: pageLogins.length, locked: !vault.unlocked } : undefined}
+          logins={activeTab && !isHomeUrl(activeTab.url) && vault?.exists && (pageLogins.length > 0 || !vaultUsable) ? { count: pageLogins.length, locked: !vaultUsable } : undefined}
           onOpenLogins={() => (loginsMenu ? setLoginsMenu(null) : openToolbarLogins())}
         />
         <div id="browser-viewport" className="viewport">
@@ -1767,10 +2406,41 @@ export default function App() {
             />
           )}
           <div className="page-slot" ref={pageRef}>
-            {surface === "browser" && activeIsHome && <HomeSurface searchName={searchName} private={!!activeTab?.private} onNavigate={(value) => void navigate(value)} />}
-            {surface === "browser" && !activeIsHome && !isTauri() && <BrowserPreview />}
-            {surface === "browser" && !activeIsHome && activeAsleep && !activeCrash && <div className="page-waking">Reloading…</div>}
-            {surface === "browser" && !activeIsHome && activeCrash && activeTab && (
+            {showDockView && activeTab && (
+              <DockView
+                layout={activeLayout ?? { kind: "pane", tabId: activeTab.id }}
+                tabs={tabsById}
+                activeId={activeId}
+                loading={loadingTabs}
+                sleeping={sleeping}
+                crashed={crashed}
+                dragging={!!dockDrag}
+                drop={dockDrag?.target && dockDrag.side ? { target: dockDrag.target, side: dockDrag.side } : null}
+                onFocusPane={selectTab}
+                onUndock={undockTab}
+                onClose={(id) => void closeTab(id)}
+                onResize={(path, ratio) => activeLayout && setDocks((layouts) => layouts.map((layout) => layout === activeLayout ? setRatio(layout, path, ratio) : layout))}
+                onPaneDrag={startPaneDrag}
+              />
+            )}
+            {!showDockView && surface === "browser" && activeIsHome && (
+              <HomeSurface
+                searchName={searchName}
+                private={!!activeTab?.private}
+                onNavigate={(value) => void navigate(value)}
+                suggestions={suggestAnchor === "home" ? suggestions : []}
+                selectedSuggestion={selectedSuggestion}
+                onInput={(text) => {
+                  if (text !== null) { setSuggestAnchor("home"); onAddressInput(text); }
+                  else if (suggestAnchor === "home") onAddressInput(null);
+                }}
+                onSelectSuggestion={setSelectedSuggestion}
+                onPickSuggestion={pickSuggestion}
+              />
+            )}
+            {!showDockView && surface === "browser" && !activeIsHome && !isTauri() && <BrowserPreview />}
+            {!showDockView && surface === "browser" && !activeIsHome && activeAsleep && !activeCrash && <div className="page-waking">Reloading…</div>}
+            {!showDockView && surface === "browser" && !activeIsHome && activeCrash && activeTab && (
               <div className="page-crashed" role="alert">
                 <strong>{activeCrash === "unresponsive" ? "This page stopped responding" : "This page crashed"}</strong>
                 <p>{activeCrash === "engine" ? "The browser engine stopped unexpectedly." : "Something went wrong while showing this page."} Reloading usually fixes it.</p>
@@ -1787,6 +2457,7 @@ export default function App() {
                 onOpenDownload={openDownload}
                 onRevealDownload={revealDownload}
                 onCancelDownload={cancelDownload}
+                onPauseDownload={togglePauseDownload}
                 onOpenFolder={openFolder}
                 onClearDownloads={() => void clearDownloads()}
                 onContextMenu={(x, y, items) => showMenu(x, y, items)}
@@ -1815,8 +2486,9 @@ export default function App() {
           </div>
         </div>
       </section>
-      <ContextMenu menu={menu} onClose={() => setMenu(null)} />
-      {!isTauri() && <Toasts toasts={toasts} downloads={downloads} onDismiss={(id) => setToasts((items) => items.filter((toast) => toast.id !== id))} onOpenDownload={openDownload} onCancelDownload={cancelDownload} onResolveCheck={resolveCheck} onPromptChoice={answerPrompt} position={settings.toastPosition} onHover={holdToast} />}
+      {!isTauri() && <ContextMenu menu={menuSpec?.spec ?? null} onPick={runMenuItem} onClose={() => setMenu(null)} />}
+      {!isTauri() && modalToast && <PromptModal toast={modalToast} onChoice={answerPrompt} onDismiss={dismissToast} />}
+      {!isTauri() && <Toasts toasts={cornerToasts} downloads={downloads} onDismiss={(id) => setToasts((items) => items.filter((toast) => toast.id !== id))} onOpenDownload={openDownload} onCancelDownload={cancelDownload} onPauseDownload={togglePauseDownload} onShowDownloads={() => setSurface("downloads")} onResolveCheck={resolveCheck} onPromptChoice={answerPrompt} position={settings.toastPosition} onHover={holdToast} />}
       {!isTauri() && loginsMenu && <div className="logins-anchor" style={{ left: loginsMenu.anchor.x, top: loginsMenu.anchor.y, width: Math.max(280, loginsMenu.anchor.width) }}><LoginsMenu items={loginsMenu.items} onPick={pickLogin} /></div>}
       {!isTauri() && tooltip && <InlineTooltip tip={tooltip} />}
       {!isTauri() && siteInfoOpen && siteInfo && (
@@ -1837,7 +2509,7 @@ export default function App() {
 
 /** Tooltip drawn in the chrome itself (browser preview; the desktop app uses an overlay). */
 function InlineTooltip({ tip }: { tip: { text: string; x: number; y: number } }) {
-  const { left, top } = tooltipPosition(tip, Math.min(340, tip.text.length * 7 + 20), 26);
+  const { left, top } = tooltipPosition(tip, Math.min(425, tip.text.length * 9 + 25), 32);
   return (
     <div className="tooltip is-inline" role="tooltip" style={{ left, top }}>
       {tip.text}

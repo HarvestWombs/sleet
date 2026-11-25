@@ -118,7 +118,7 @@ export function BookmarkGrid({ bookmarks, expanded, stateOf, onOpen, onToggleFol
       >
         {bookmark.kind === "folder"
           ? isOpenFolder
-            ? <FolderOpen size={16} className="bm-folder-glyph" />
+            ? <FolderOpen size={20} className="bm-folder-glyph" />
             : (
               <span className="bm-preview" data-count={Math.min(bookmark.children?.length ?? 0, 4)} aria-hidden="true">
                 {(bookmark.children ?? []).slice(0, 4).map((child) => <SiteIcon key={child.id} url={child.url} title={child.title} className="bm-mini" />)}
@@ -156,7 +156,7 @@ export function BookmarkGrid({ bookmarks, expanded, stateOf, onOpen, onToggleFol
       {bookmarks.length === 0 && <p className="bm-empty">Press Ctrl+D or drag a tab here to pin a site</p>}
       {drag && dragged && (
         <div className="bm-ghost" style={{ left: drag.x, top: drag.y }} aria-hidden="true">
-          {dragged.kind === "folder" ? <FolderOpen size={16} /> : <SiteIcon url={dragged.url} title={dragged.title} className="bm-icon" />}
+          {dragged.kind === "folder" ? <FolderOpen size={20} /> : <SiteIcon url={dragged.url} title={dragged.title} className="bm-icon" />}
         </div>
       )}
     </div>
@@ -167,11 +167,13 @@ export function BookmarkGrid({ bookmarks, expanded, stateOf, onOpen, onToggleFol
  * Inline editor shown in the sidebar (pages can't cover it there). Bookmarks:
  * name and address. Folders: label and color; color changes apply right away.
  */
-export function BookmarkEditor({ bookmark, onSave, onColor, onCancel }: {
+export function BookmarkEditor({ bookmark, onSave, onColor, onCancel, heading }: {
   bookmark: Bookmark;
   onSave: (patch: { title: string; url?: string }) => void;
   onColor: (color: string) => void;
   onCancel: () => void;
+  /** Title over the fields (tab groups use this editor too). */
+  heading?: string;
 }) {
   const [title, setTitle] = useState(bookmark.title);
   const [url, setUrl] = useState(bookmark.url ?? "");
@@ -185,7 +187,7 @@ export function BookmarkEditor({ bookmark, onSave, onColor, onCancel }: {
       onSubmit={(event) => { event.preventDefault(); onSave({ title: title.trim() || bookmark.title, url: isFolder ? undefined : url.trim() || bookmark.url }); }}
       onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); onCancel(); } }}
     >
-      <strong>{isFolder ? "Folder" : "Edit bookmark"}</strong>
+      <strong>{heading ?? (isFolder ? "Folder" : "Edit bookmark")}</strong>
       <input autoFocus value={title} onFocus={(event) => event.currentTarget.select()} onChange={(event) => setTitle(event.target.value)} aria-label={isFolder ? "Folder label" : "Name"} placeholder={isFolder ? "Label" : "Name"} />
       {!isFolder && <input value={url} onChange={(event) => setUrl(event.target.value)} aria-label="Address" placeholder="https://" spellCheck={false} />}
       {isFolder && (

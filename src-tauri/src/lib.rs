@@ -2,6 +2,7 @@ mod bookmark_import;
 mod browsing;
 mod page_scripts;
 mod default_browser;
+mod favicons;
 mod native;
 mod page_hooks;
 mod password_bridge;
@@ -9,6 +10,7 @@ mod privacy;
 mod store;
 mod vault;
 mod vault_commands;
+mod windows;
 
 use serde::Serialize;
 use std::{path::PathBuf, sync::Mutex};
@@ -28,6 +30,17 @@ struct ViewBounds {
     y: f64,
     width: f64,
     height: f64,
+}
+
+/// Position and size as one change. Setting them separately makes wry read the
+/// other half back from the window, and after a page moved to another window
+/// (reparent) it measures against the old one, shifting the page by the gap
+/// between the two windows.
+fn view_rect(bounds: ViewBounds) -> tauri::Rect {
+    tauri::Rect {
+        position: LogicalPosition::new(bounds.x, bounds.y).into(),
+        size: LogicalSize::new(bounds.width.max(1.0), bounds.height.max(1.0)).into(),
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -58,6 +71,7 @@ struct DownloadDir(Mutex<Option<PathBuf>>);
 #[tauri::command]
 async fn create_browser_view(
     app: AppHandle,
+    caller: tauri::Webview,
     label: String,
     url: String,
     bounds: ViewBounds,
@@ -70,9 +84,8 @@ async fn create_browser_view(
     }
 
     let parsed = Url::parse(&url).map_err(|error| error.to_string())?;
-    let window = app
-        .get_window("main")
-        .ok_or_else(|| "main window is not available".to_string())?;
+    // The page goes in the window whose Sleet chrome asked for it.
+    let window = caller.window();
 
     let navigation_app = app.clone();
     let title_app = app.clone();
@@ -83,6 +96,7 @@ async fn create_browser_view(
     let label_for_title = label.clone();
     let label_for_download = label.clone();
     let upgrade_label = label.clone();
+    let popup_label = label.clone();
 
     let mut builder = WebviewBuilder::new(label.clone(), WebviewUrl::External(parsed))
         .initialization_script(
@@ -113,13 +127,13 @@ async fn create_browser_view(
                   if (plain && event.key === 'Escape' && document.readyState !== 'complete') { send('stop'); return; }
                   if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
                   const commands = {
-                    k: 'palette', l: 'address', t: 'new-tab', w: 'close-tab',
+                    k: 'palette', l: 'address', t: 'new-tab', n: 'new-window', w: 'close-tab',
                     y: 'history', j: 'downloads', ',': 'settings',
                     '=': 'zoom-in', '+': 'zoom-in', '-': 'zoom-out', '0': 'zoom-reset', d: 'bookmark',
                     f: 'find', g: 'find-next', p: 'print', r: 'reload',
                     tab: 'next-tab', pagedown: 'next-tab', pageup: 'previous-tab'
                   };
-                  const shifted = { n: 'new-private-tab', w: 'reopen-tab', t: 'reopen-tab', tab: 'previous-tab', g: 'find-previous', delete: 'clear-data', r: 'reload' };
+                  const shifted = { n: 'new-private-tab', w: 'reopen-tab', t: 'reopen-tab', s: 'toggle-sidebar', tab: 'previous-tab', g: 'find-previous', delete: 'clear-data', r: 'reload' };
                   const key = event.key.toLowerCase();
                   const digit = !event.shiftKey && /^[1-9]$/.test(event.key) ? `tab-index-${event.key}` : null;
                   const command = digit ?? (event.shiftKey && shifted[key] ? shifted[key] : commands[key]);
@@ -172,7 +186,7 @@ async fn create_browser_view(
                         );
                     }
                     Some(command) => {
-                        let _ = command_app.emit("sleet-command", command.to_string());
+                        let _ = command_app.emit("sleet-command", serde_json::json!({ "label": upgrade_label, "command": command }));
                     }
                     None => {}
                 }
@@ -201,7 +215,7 @@ async fn create_browser_view(
             }
             matches!(url.scheme(), "http" | "https")
         })
-        .on_page_load(move |_webview, payload| {
+        .on_page_load(move |webview, payload| {
             let _ = navigation_app.emit(
                 "sleet-loading",
                 serde_json::json!({ "label": label_for_navigation, "loading": matches!(payload.event(), PageLoadEvent::Started) }),
@@ -214,6 +228,8 @@ async fn create_browser_view(
                         url: payload.url().to_string(),
                     },
                 );
+                // A sharp, large site icon to replace the engine's 16px one.
+                favicons::refresh(navigation_app.clone(), webview.clone(), label_for_navigation.clone());
             }
         })
         .on_document_title_changed(move |_webview, title| {
@@ -228,9 +244,9 @@ async fn create_browser_view(
         .on_new_window(move |url, _features| {
             // On Windows the popup blocker (privacy.rs) decides and opens the tab.
             #[cfg(not(target_os = "windows"))]
-            let _ = popup_app.emit("sleet-new-tab", url.to_string());
+            let _ = popup_app.emit("sleet-new-tab", serde_json::json!({ "label": popup_label, "url": url.as_str() }));
             #[cfg(target_os = "windows")]
-            let _ = (&popup_app, url);
+            let _ = (&popup_app, &popup_label, url);
             NewWindowResponse::Deny
         })
         .on_download(move |_webview, event| {
@@ -247,6 +263,15 @@ async fn create_browser_view(
                             *destination = folder.join(name);
                         }
                     }
+                    // "Ask where to save each file". On Windows the engine waits for
+                    // the dialog without blocking (see native::watch_downloads).
+                    #[cfg(not(target_os = "windows"))]
+                    if native::ASK_WHERE.load(std::sync::atomic::Ordering::Relaxed) {
+                        match native::ask_save_path(destination) {
+                            Some(chosen) => *destination = chosen,
+                            None => return false,
+                        }
+                    }
                     let _ = download_app.emit(
                         "sleet-download",
                         DownloadPayload {
@@ -258,6 +283,9 @@ async fn create_browser_view(
                         },
                     );
                 }
+                // On Windows Sleet tracks how downloads end itself (native::watch_downloads):
+                // the engine reports a pause as "finished, failed", which would end it here.
+                #[cfg(not(target_os = "windows"))]
                 DownloadEvent::Finished { url, path, success } => {
                     let _ = download_app.emit(
                         "sleet-download",
@@ -321,22 +349,31 @@ fn navigate_browser_view(app: AppHandle, label: String, url: String) -> Result<(
 
 /// Shows the active page and hides the rest. Focus only moves when asked, so
 /// background updates (titles, navigation) never steal focus from the chrome.
+/// `also_visible`: other pages docked beside the active one stay shown.
 #[tauri::command]
 fn activate_browser_view(
     app: AppHandle,
     active_label: Option<String>,
     labels: Vec<String>,
     focus: Option<bool>,
+    also_visible: Option<Vec<String>>,
 ) -> Result<(), String> {
+    let also_visible = also_visible.unwrap_or_default();
     for label in labels {
         if let Some(webview) = app.get_webview(&label) {
             if active_label.as_deref() == Some(label.as_str()) {
+                page_hooks::set_low_memory(&webview, false);
                 webview.show().map_err(|error| error.to_string())?;
                 if focus.unwrap_or(false) {
                     webview.set_focus().map_err(|error| error.to_string())?;
                 }
+            } else if active_label.is_some() && also_visible.contains(&label) {
+                page_hooks::set_low_memory(&webview, false);
+                webview.show().map_err(|error| error.to_string())?;
             } else {
                 webview.hide().map_err(|error| error.to_string())?;
+                // Out of sight: let the engine trim this page's memory.
+                page_hooks::set_low_memory(&webview, true);
             }
         }
     }
@@ -347,8 +384,7 @@ fn activate_browser_view(
 fn resize_browser_view(app: AppHandle, label: String, bounds: ViewBounds) -> Result<(), String> {
     if let Some(webview) = app.get_webview(&label) {
         webview
-            .set_position(LogicalPosition::new(bounds.x, bounds.y))
-            .and_then(|_| webview.set_size(LogicalSize::new(bounds.width, bounds.height)))
+            .set_bounds(view_rect(bounds))
             .map_err(|error| error.to_string())?;
     }
     Ok(())
@@ -382,7 +418,7 @@ async fn step_history(app: AppHandle, label: String, back: bool) -> Result<bool,
 }
 
 /// Keeps overlays (hidden ones too) above pages, which are added later and stack on top.
-fn raise_overlays(app: &AppHandle) {
+pub(crate) fn raise_overlays(app: &AppHandle) {
     for (label, webview) in app.webviews() {
         if label.starts_with(OVERLAY_PREFIX) {
             page_hooks::raise(&webview);
@@ -396,6 +432,7 @@ fn raise_overlays(app: &AppHandle) {
 #[tauri::command]
 async fn overlay_show(
     app: AppHandle,
+    caller: tauri::Webview,
     label: String,
     kind: String,
     bounds: ViewBounds,
@@ -408,12 +445,11 @@ async fn overlay_show(
     let webview = match app.get_webview(&label) {
         Some(webview) => webview,
         None => {
-            let mut url = chrome_webview(&app)?.url().map_err(|error| error.to_string())?;
+            // Overlays belong to the window of the chrome that shows them.
+            let mut url = caller.url().map_err(|error| error.to_string())?;
             url.set_fragment(None);
             url.set_query(Some(&format!("overlay={kind}")));
-            let window = app
-                .get_window("main")
-                .ok_or_else(|| "main window is not available".to_string())?;
+            let window = caller.window();
             let builder = WebviewBuilder::new(label.clone(), WebviewUrl::External(url))
                 .transparent(true)
                 .position(LogicalPosition::new(bounds.x, bounds.y))
@@ -422,8 +458,7 @@ async fn overlay_show(
         }
     };
     webview
-        .set_position(LogicalPosition::new(bounds.x, bounds.y))
-        .and_then(|_| webview.set_size(LogicalSize::new(bounds.width.max(1.0), bounds.height.max(1.0))))
+        .set_bounds(view_rect(bounds))
         .and_then(|_| webview.show())
         .map_err(|error| error.to_string())?;
     if let Some(zoom) = zoom {
@@ -441,9 +476,18 @@ async fn overlay_show(
 fn overlay_place(app: AppHandle, label: String, bounds: ViewBounds) -> Result<(), String> {
     if let Some(webview) = app.get_webview(&label).filter(|_| label.starts_with(OVERLAY_PREFIX)) {
         webview
-            .set_position(LogicalPosition::new(bounds.x, bounds.y))
-            .and_then(|_| webview.set_size(LogicalSize::new(bounds.width.max(1.0), bounds.height.max(1.0))))
+            .set_bounds(view_rect(bounds))
             .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/// Closes an overlay to free its memory (each is a separate engine process
+/// worth ~40 MB). Rarely used overlays are released after a while unused.
+#[tauri::command]
+fn overlay_release(app: AppHandle, label: String) -> Result<(), String> {
+    if let Some(webview) = app.get_webview(&label).filter(|_| label.starts_with(OVERLAY_PREFIX)) {
+        webview.close().map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -505,6 +549,17 @@ fn cancel_download(app: AppHandle, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn pause_download(app: AppHandle, id: String, pause: bool) -> Result<(), String> {
+    native::pause_download(&app, id, pause)
+}
+
+/// "Ask where to save each file" (Settings → Downloads).
+#[tauri::command]
+fn set_download_ask(ask: bool) {
+    native::ASK_WHERE.store(ask, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[tauri::command]
 fn resolve_download_check(app: AppHandle, check_id: u64, keep: bool) -> Result<(), String> {
     native::resolve_download_check(&app, check_id, keep)
 }
@@ -545,8 +600,8 @@ pub(crate) fn chrome_webview(app: &AppHandle) -> Result<tauri::Webview, String> 
 }
 
 #[tauri::command]
-fn set_chrome_zoom(app: AppHandle, zoom: f64) -> Result<(), String> {
-    chrome_webview(&app)?
+fn set_chrome_zoom(caller: tauri::Webview, zoom: f64) -> Result<(), String> {
+    caller
         .set_zoom(zoom.clamp(0.5, 2.0))
         .map_err(|error| error.to_string())
 }
@@ -587,8 +642,11 @@ fn open_downloads_folder(app: AppHandle, state: State<'_, DownloadDir>) -> Resul
 
 /// Moves keyboard focus from a page back to the Sleet chrome webview.
 #[tauri::command]
-fn focus_chrome(app: AppHandle) -> Result<(), String> {
-    chrome_webview(&app)?
+fn focus_chrome(app: AppHandle, caller: tauri::Webview) -> Result<(), String> {
+    // The chrome webview carries its window's label (overlays ask on its behalf too).
+    let window = caller.window();
+    app.get_webview(window.label())
+        .unwrap_or(caller)
         .set_focus()
         .map_err(|error| error.to_string())
 }
@@ -670,6 +728,15 @@ pub fn run() {
         .manage(default_browser::LaunchUrls(std::sync::Mutex::new(launch_urls)))
         .runtime(tauri_runtime_wry::Wry::default())
         .manage(DownloadDir::default())
+        .manage(windows::WindowStarts::default())
+        .manage(windows::LastFocused::default())
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::Focused(true) => windows::remember_focus(window),
+            tauri::WindowEvent::Destroyed => {
+                let _ = window.app_handle().emit("sleet-windows-changed", ());
+            }
+            _ => {}
+        })
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
@@ -697,6 +764,13 @@ pub fn run() {
             set_view_muted,
             open_download_panel,
             cancel_download,
+            pause_download,
+            set_download_ask,
+            windows::open_window,
+            windows::take_window_start,
+            windows::move_tabs_to_window,
+            windows::list_windows,
+            windows::window_at,
             set_privacy_options,
             allow_http,
             allow_certificate,
@@ -708,6 +782,7 @@ pub fn run() {
             store::kv_set,
             store::kv_set_many,
             store::kv_delete_prefix,
+            store::kv_delete,
             vault_commands::vault_status,
             vault_commands::vault_create,
             vault_commands::vault_unlock,
@@ -745,6 +820,7 @@ pub fn run() {
             step_history,
             overlay_show,
             overlay_hide,
+            overlay_release,
             overlay_place,
             set_chrome_zoom,
             open_download,

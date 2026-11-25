@@ -3,17 +3,45 @@
 
 use tauri::{AppHandle, Webview};
 
-/// A download ended. Keyed by the address it started from, so redirects
-/// (GitHub release files, CDNs) still match the entry Sleet created.
+/// A download changed state. Keyed by the address it started from, so
+/// redirects (GitHub release files, CDNs) still match the entry Sleet created.
 #[derive(Clone, serde::Serialize)]
 pub struct DownloadState {
     pub label: String,
     pub url: String,
-    /// `complete`, `cancelled` or `failed`.
+    /// Final: `complete`, `cancelled`, `failed`, or `discarded` (the user
+    /// closed the Save as dialog, so the download never started).
+    /// Ongoing: `paused` (by the user, or by a network error it can resume
+    /// from) and `active` (running again, or saving to a new path).
     pub state: &'static str,
     pub path: Option<String>,
-    /// Why it failed, in plain words.
+    /// Why it failed or stopped, in plain words.
     pub reason: Option<&'static str>,
+}
+
+/// "Ask where to save each file" (Settings → Downloads).
+pub static ASK_WHERE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The Save as dialog for a download. `None` when the user closes it.
+fn save_dialog(suggested: &std::path::Path) -> rfd::FileDialog {
+    let mut dialog = rfd::FileDialog::new().set_title("Save as");
+    if let Some(folder) = suggested.parent().filter(|folder| folder.is_dir()) {
+        dialog = dialog.set_directory(folder);
+    }
+    if let Some(name) = suggested.file_name() {
+        dialog = dialog.set_file_name(name.to_string_lossy());
+    }
+    if let Some(extension) = suggested.extension().map(|value| value.to_string_lossy().into_owned()).filter(|value| !value.is_empty()) {
+        dialog = dialog.add_filter(format!("{} file", extension.to_uppercase()), &[extension.as_str()]).add_filter("All files", &["*"]);
+    }
+    dialog
+}
+
+/// Asks where to save a download, blocking the caller (used where the engine
+/// waits on a synchronous answer). `None` when the user cancels.
+#[cfg(not(target_os = "windows"))]
+pub fn ask_save_path(suggested: &std::path::Path) -> Option<std::path::PathBuf> {
+    save_dialog(suggested).save_file()
 }
 
 /// Windows flagged a file type as potentially harmful; Sleet asks the user
@@ -164,8 +192,56 @@ mod imp {
         static OPERATIONS: RefCell<HashMap<String, ICoreWebView2DownloadOperation>> = RefCell::new(HashMap::new());
         /// Security checks waiting for the user's keep/delete answer.
         static CHECKS: RefCell<HashMap<u64, (ICoreWebView2SaveFileSecurityCheckStartingEventArgs, ICoreWebView2Deferral)>> = RefCell::new(HashMap::new());
+        /// Downloads held while the Save as dialog is open.
+        static SAVES: RefCell<HashMap<u64, (ICoreWebView2DownloadStartingEventArgs, ICoreWebView2Deferral)>> = RefCell::new(HashMap::new());
     }
     static NEXT_CHECK: AtomicU64 = AtomicU64::new(1);
+
+    /// Holds a starting download (WebView2 deferral) while the Save as dialog
+    /// is open on another thread, then saves where the user chose or drops it.
+    /// The engine's own handler has already applied the download folder.
+    fn ask_where(app: &AppHandle, label: &str, url: &str, args: &ICoreWebView2DownloadStartingEventArgs) -> windows_core::Result<()> {
+        let suggested = {
+            let mut path = PWSTR::null();
+            unsafe { args.ResultFilePath(&mut path)? };
+            std::path::PathBuf::from(take_pwstr(path))
+        };
+        let deferral = unsafe { args.GetDeferral()? };
+        let id = NEXT_CHECK.fetch_add(1, Ordering::Relaxed);
+        SAVES.with(|saves| saves.borrow_mut().insert(id, (args.clone(), deferral)));
+        let mut dialog = super::save_dialog(&suggested);
+        if let Some(window) = app.get_webview(label).map(|webview| webview.window()) {
+            dialog = dialog.set_parent(&window);
+        }
+        let (app, label, url) = (app.clone(), label.to_string(), url.to_string());
+        std::thread::spawn(move || {
+            let chosen = dialog.save_file();
+            let main = app.clone();
+            let _ = main.run_on_main_thread(move || {
+                let Some((args, deferral)) = SAVES.with(|saves| saves.borrow_mut().remove(&id)) else { return };
+                let state = match &chosen {
+                    Some(path) => {
+                        let target = windows_core::HSTRING::from(path.as_os_str());
+                        let _ = unsafe { args.SetResultFilePath(windows_core::PCWSTR(target.as_ptr())) };
+                        "active"
+                    }
+                    None => {
+                        let _ = unsafe { args.SetCancel(true) };
+                        "discarded"
+                    }
+                };
+                let _ = unsafe { deferral.Complete() };
+                let _ = app.emit("sleet-download-state", DownloadState {
+                    label,
+                    url,
+                    state,
+                    path: chosen.map(|path| path.to_string_lossy().into_owned()),
+                    reason: None,
+                });
+            });
+        });
+        Ok(())
+    }
 
     fn reason_text(reason: COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON) -> &'static str {
         match reason {
@@ -206,6 +282,9 @@ mod imp {
                     };
                     let key = format!("{start_label}:{url}");
                     OPERATIONS.with(|ops| ops.borrow_mut().insert(key.clone(), operation.clone()));
+                    if super::ASK_WHERE.load(Ordering::Relaxed) {
+                        let _ = ask_where(&start_app, &start_label, &url, &args);
+                    }
 
                     // Progress, at most once per percent (or per MiB when the size is unknown).
                     let app = start_app.clone();
@@ -241,8 +320,29 @@ mod imp {
                         let Some(operation) = operation else { return Ok(()) };
                         let mut state = COREWEBVIEW2_DOWNLOAD_STATE::default();
                         unsafe { operation.State(&mut state)? };
+                        let report = |state: &'static str, reason: Option<&'static str>| {
+                            let _ = app.emit("sleet-download-state", DownloadState { label: label.clone(), url: url.clone(), state, path: None, reason });
+                        };
                         if state == COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS {
+                            // Running again after a pause.
+                            report("active", None);
                             return Ok(());
+                        }
+                        if state == COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED {
+                            // Paused by the user, or stopped by an error it can pick up
+                            // from: keep the operation so Resume can continue it.
+                            let mut reason = COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON::default();
+                            let _ = unsafe { operation.InterruptReason(&mut reason) };
+                            let mut can_resume = windows_core::BOOL::default();
+                            let _ = unsafe { operation.CanResume(&mut can_resume) };
+                            if reason == COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_PAUSED {
+                                report("paused", None);
+                                return Ok(());
+                            }
+                            if can_resume.as_bool() && reason != COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_CANCELED && reason != COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_SHUTDOWN {
+                                report("paused", Some(reason_text(reason)));
+                                return Ok(());
+                            }
                         }
                         OPERATIONS.with(|ops| ops.borrow_mut().remove(&key));
                         let path = {
@@ -312,6 +412,18 @@ mod imp {
         .map_err(|error| error.to_string())
     }
 
+    /// Pauses (`true`) or resumes (`false`) a running download.
+    pub fn pause_download(app: &AppHandle, id: String, pause: bool) -> Result<(), String> {
+        app.run_on_main_thread(move || {
+            OPERATIONS.with(|ops| {
+                if let Some(operation) = ops.borrow().get(&id) {
+                    let _ = unsafe { if pause { operation.Pause() } else { operation.Resume() } };
+                }
+            });
+        })
+        .map_err(|error| error.to_string())
+    }
+
     /// Answers a security check: keep the file (skip Windows' warning for this
     /// one file only) or delete it.
     pub fn resolve_download_check(app: &AppHandle, check_id: u64, keep: bool) -> Result<(), String> {
@@ -339,6 +451,10 @@ mod imp {
 
     pub fn cancel_download(_app: &AppHandle, _id: String) -> Result<(), String> {
         Err("cancelling downloads is not supported on this platform".into())
+    }
+
+    pub fn pause_download(_app: &AppHandle, _id: String, _pause: bool) -> Result<(), String> {
+        Err("pausing downloads is not supported on this platform yet".into())
     }
 
     pub fn resolve_download_check(_app: &AppHandle, _check_id: u64, _keep: bool) -> Result<(), String> {
@@ -397,6 +513,10 @@ pub fn cancel_download(app: &AppHandle, id: String) -> Result<(), String> {
 
 pub fn resolve_download_check(app: &AppHandle, check_id: u64, keep: bool) -> Result<(), String> {
     imp::resolve_download_check(app, check_id, keep)
+}
+
+pub fn pause_download(app: &AppHandle, id: String, pause: bool) -> Result<(), String> {
+    imp::pause_download(app, id, pause)
 }
 
 /// Opens a file with its default application.

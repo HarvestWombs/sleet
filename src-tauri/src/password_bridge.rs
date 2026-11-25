@@ -142,6 +142,10 @@ pub fn handle(app: &AppHandle, label: &str, origin: &str, text: &str) {
     match message.sleet.as_str() {
         "login-focus" => {
             let Some(rect) = message.rect else { return };
+            if !crate::privacy::is_private(label) {
+                let store = app.state::<crate::store::Store>();
+                crate::vault_commands::auto_unlock(app, &app.state::<Vault>(), &store);
+            }
             let _ = app.emit("sleet-login-focus", LoginFocus {
                 label: label.into(),
                 origin: origin.into(),
@@ -163,6 +167,7 @@ pub fn handle(app: &AppHandle, label: &str, origin: &str, text: &str) {
             let Some(password) = message.password.filter(|password| !password.is_empty() && password.len() < 4096) else { return };
             let username: String = message.username.unwrap_or_default().chars().take(512).collect();
             let vault = app.state::<Vault>();
+            crate::vault_commands::auto_unlock(app, &vault, &app.state::<crate::store::Store>());
             let Some(offer) = vault.offer(origin, &username, &password) else { return };
             if offer.kind == "update" {
                 let store = app.state::<crate::store::Store>();

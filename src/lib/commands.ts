@@ -1,9 +1,10 @@
-import { Download, FileDown, Maximize, Printer, TextSearch, Globe, History, Moon, Plus, RotateCcw, Settings2, Shield, Star, VenetianMask, type LucideIcon } from "lucide-react";
+import { AppWindow, PanelLeft, Download, FileDown, Maximize, Printer, TextSearch, Globe, History, Moon, Plus, RotateCcw, Settings2, Shield, Star, VenetianMask, type LucideIcon } from "lucide-react";
 
 /** Something the address bar can run instead of opening a page. */
 export type PaletteCommand =
   | { kind: "navigate"; value: string }
   | { kind: "new-tab" }
+  | { kind: "new-window" }
   | { kind: "new-private-tab" }
   | { kind: "reopen-tab" }
   | { kind: "bookmark" }
@@ -14,7 +15,8 @@ export type PaletteCommand =
   | { kind: "find" }
   | { kind: "print" }
   | { kind: "save-pdf" }
-  | { kind: "fullscreen" };
+  | { kind: "fullscreen" }
+  | { kind: "toggle-sidebar" };
 
 export interface CommandEntry {
   id: string;
@@ -29,6 +31,7 @@ export interface CommandEntry {
 /** Commands offered in the address bar dropdown (Ctrl+K lists them all). */
 export const COMMANDS: CommandEntry[] = [
   { id: "new-tab", icon: Plus, title: "Open a new tab", detail: "Start a fresh page", shortcut: "Ctrl T", keywords: "new tab open", command: { kind: "new-tab" } },
+  { id: "new-window", icon: AppWindow, title: "Open a new window", detail: "Another Sleet window with its own tabs", shortcut: "Ctrl N", keywords: "new window open", command: { kind: "new-window" } },
   { id: "private-tab", icon: VenetianMask, title: "Open a private tab", detail: "No history; cookies are thrown away when closed", shortcut: "Ctrl Shift N", keywords: "private incognito inprivate tab", command: { kind: "new-private-tab" } },
   { id: "reopen-tab", icon: RotateCcw, title: "Reopen closed tab", detail: "Bring back the tab you closed last", shortcut: "Ctrl Shift W", keywords: "reopen undo closed tab restore", command: { kind: "reopen-tab" } },
   { id: "bookmark", icon: Star, title: "Bookmark this page", detail: "Pin it to the grid at the top of the sidebar", shortcut: "Ctrl D", keywords: "bookmark favorite pin star save", command: { kind: "bookmark" } },
@@ -36,6 +39,7 @@ export const COMMANDS: CommandEntry[] = [
   { id: "print", icon: Printer, title: "Print…", detail: "Print this page or save it with the print dialog", shortcut: "Ctrl P", keywords: "print printer paper", command: { kind: "print" } },
   { id: "save-pdf", icon: FileDown, title: "Save page as PDF", detail: "Saves to your Downloads folder", keywords: "pdf save export print document", command: { kind: "save-pdf" } },
   { id: "fullscreen", icon: Maximize, title: "Full screen", detail: "Hide Sleet's interface; F11 again to leave", shortcut: "F11", keywords: "full screen fullscreen kiosk immersive", command: { kind: "fullscreen" } },
+  { id: "toggle-sidebar", icon: PanelLeft, title: "Show or hide the sidebar", detail: "More room for the page", shortcut: "Ctrl Shift S", keywords: "sidebar tabs panel hide show collapse", command: { kind: "toggle-sidebar" } },
   { id: "import-bookmarks", icon: Star, title: "Import bookmarks", detail: "From another browser or a bookmarks file", keywords: "import bookmarks favorites chrome edge firefox arc html", command: { kind: "settings", section: "bookmarks" } },
   { id: "history", icon: History, title: "Show history", detail: "Recently visited pages", shortcut: "Ctrl Y", keywords: "history visited recent", command: { kind: "history" } },
   { id: "downloads", icon: Download, title: "Show downloads", detail: "Files saved by Sleet", shortcut: "Ctrl J", keywords: "downloads files", command: { kind: "downloads" } },

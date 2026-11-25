@@ -1,11 +1,13 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ArrowLeft, ArrowRight, Info, LockKeyhole, LockKeyholeOpen, Minus, MoreHorizontal, RotateCw, KeyRound, Search, ShieldAlert, Square, Star, VenetianMask, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Info, LockKeyhole, LockKeyholeOpen, Minus, MoreHorizontal, RotateCw, KeyRound, Search, ShieldAlert, Square, Star, VenetianMask, X, PanelLeftOpen } from "lucide-react";
 import { type FormEvent, type KeyboardEvent, useEffect, useState } from "react";
 import { isHomeUrl, simplifyUrl, siteSecurity } from "../lib/browser";
 import type { Suggestion } from "../lib/suggest";
+import { enterIndexOf, handleAddressKey } from "../lib/addressKeys";
 import { isTauri } from "../native/browserEngine";
 import { SuggestionList } from "./SuggestionList";
-import type { BrowserTab } from "../types";
+import type { BrowserTab, DownloadItem } from "../types";
+import { DownloadIcon } from "./DownloadIcon";
 import { IconButton } from "./IconButton";
 
 interface ToolbarProps {
@@ -24,6 +26,9 @@ interface ToolbarProps {
   onAction: (action: "back" | "forward" | "reload" | "stop") => void;
   /** The page is loading: Reload becomes Stop and a bar runs under the toolbar. */
   loading?: boolean;
+  /** There is somewhere to go back / forward to (otherwise the button is greyed out). */
+  canGoBack?: boolean;
+  canGoForward?: boolean;
   onMore: () => void;
   suggestions: Suggestion[];
   /** Highlighted suggestion; -1 for none. */
@@ -36,17 +41,21 @@ interface ToolbarProps {
   onOpenSiteInfo: () => void;
   /** Ctrl+K: the dropdown lists commands. */
   commandMode?: boolean;
+  /** The sidebar is hidden: show buttons to bring it back (and downloads, while running). */
+  sidebarHidden?: boolean;
+  onShowSidebar?: () => void;
+  downloads?: DownloadItem[];
+  onOpenDownloads?: () => void;
 }
 
-export function Toolbar({ tab, fullUrls, zoom, onResetZoom, bookmarked, onToggleBookmark, logins, onOpenLogins, onNavigate, onAction, onMore, suggestions, selectedSuggestion, onAddressInput, onSelectSuggestion, onPickSuggestion, onOpenSiteInfo, commandMode = false, loading = false }: ToolbarProps) {
+export function Toolbar({ tab, fullUrls, zoom, onResetZoom, bookmarked, onToggleBookmark, logins, onOpenLogins, onNavigate, onAction, onMore, suggestions, selectedSuggestion, onAddressInput, onSelectSuggestion, onPickSuggestion, onOpenSiteInfo, commandMode = false, loading = false, canGoBack = true, canGoForward = true, sidebarHidden = false, onShowSidebar, downloads = [], onOpenDownloads }: ToolbarProps) {
   const tabUrl = tab && !isHomeUrl(tab.url) ? tab.url : "";
   const [address, setAddress] = useState(tabUrl);
   const [focused, setFocused] = useState(false);
 
   useEffect(() => setAddress(tabUrl), [tab?.id, tabUrl]);
 
-  // The row Enter opens: the highlighted one, else a site the typed word starts.
-  const enterIndex = selectedSuggestion >= 0 ? selectedSuggestion : suggestions.findIndex((item) => item.autocomplete);
+  const enterIndex = enterIndexOf(suggestions, selectedSuggestion);
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -57,31 +66,16 @@ export function Toolbar({ tab, fullUrls, zoom, onResetZoom, bookmarked, onToggle
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-    // Classic shortcuts: wrap a bare name as www.<name>.com / .net / .org.
-    if (event.key === "Enter" && (event.ctrlKey || event.shiftKey) && !event.altKey) {
-      const tld = event.ctrlKey && event.shiftKey ? "org" : event.ctrlKey ? "com" : "net";
-      const name = address.trim();
-      if (/^[a-z0-9-]+$/i.test(name)) {
-        event.preventDefault();
-        onAddressInput(null);
-        onNavigate(`https://www.${name}.${tld}/`);
-        event.currentTarget.blur();
-        return;
-      }
-    }
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      if (suggestions.length === 0) return;
-      event.preventDefault();
-      const step = event.key === "ArrowDown" ? 1 : -1;
-      const from = selectedSuggestion >= 0 ? selectedSuggestion : step > 0 ? -1 : suggestions.length;
-      onSelectSuggestion((from + step + suggestions.length) % suggestions.length);
-      return;
-    }
-    if (event.key === "Escape") {
-      if (suggestions.length > 0) { onAddressInput(null); return; }
-      setAddress(tabUrl);
-      event.currentTarget.blur();
-    }
+    const input = event.currentTarget;
+    handleAddressKey(event, {
+      value: address,
+      suggestions,
+      selected: selectedSuggestion,
+      onSelect: onSelectSuggestion,
+      onInput: onAddressInput,
+      onNavigate,
+      onEscape: () => { setAddress(tabUrl); input.blur(); },
+    });
   };
 
   const windowAction = (action: "minimize" | "maximize" | "close") => {
@@ -97,23 +91,25 @@ export function Toolbar({ tab, fullUrls, zoom, onResetZoom, bookmarked, onToggle
   return (
     <header className="toolbar" data-tauri-drag-region>
       <div className="toolbar-nav" data-tauri-drag-region>
-        <IconButton label="Back" onClick={() => onAction("back")}><ArrowLeft size={18} /></IconButton>
-        <IconButton label="Forward" onClick={() => onAction("forward")}><ArrowRight size={18} /></IconButton>
+        {sidebarHidden && <IconButton label="Show sidebar (Ctrl+Shift+S)" onClick={onShowSidebar}><PanelLeftOpen size={21} /></IconButton>}
+        {sidebarHidden && downloads.some((item) => item.status === "active") && <IconButton label="Downloads" onClick={onOpenDownloads}><DownloadIcon downloads={downloads} size={21} /></IconButton>}
+        <IconButton label="Back (Alt+Left)" disabled={!canGoBack} onClick={() => onAction("back")}><ArrowLeft size={23} /></IconButton>
+        <IconButton label="Forward (Alt+Right)" disabled={!canGoForward} onClick={() => onAction("forward")}><ArrowRight size={23} /></IconButton>
         {loading
-          ? <IconButton label="Stop loading (Esc)" onClick={() => onAction("stop")}><X size={18} /></IconButton>
-          : <IconButton label="Reload (Ctrl+R)" onClick={() => onAction("reload")}><RotateCw size={17} /></IconButton>}
+          ? <IconButton label="Stop loading (Esc)" onClick={() => onAction("stop")}><X size={23} /></IconButton>
+          : <IconButton label="Reload (Ctrl+R)" onClick={() => onAction("reload")}><RotateCw size={21} /></IconButton>}
       </div>
       <form className="address" onSubmit={submit} data-tauri-drag-region>
-        {tab?.private && <span className="address-private" title="Private tab"><VenetianMask size={13} /></span>}
+        {tab?.private && <span className="address-private" title="Private tab"><VenetianMask size={16} /></span>}
         {(() => {
           const security = siteSecurity(tab);
           const open = () => onOpenSiteInfo();
-          if (security === "none") return <span className="address-security"><Search size={14} /></span>;
+          if (security === "none") return <span className="address-security"><Search size={18} /></span>;
           const props = { type: "button" as const, onClick: open, onMouseDown: (event: { preventDefault: () => void }) => event.preventDefault() };
-          if (security === "secure") return <button {...props} className="address-security is-secure" title="Connection is secure. Site information"><LockKeyhole size={14} /></button>;
-          if (security === "cert") return <button {...props} className="address-security is-insecure" title="Certificate problem. Site information"><ShieldAlert size={14} /><em>Not secure</em></button>;
-          if (security === "insecure") return <button {...props} className="address-security is-insecure" title="Not secure: this page doesn't use HTTPS. Site information"><LockKeyholeOpen size={14} /><em>Not secure</em></button>;
-          return <button {...props} className="address-security" title="Local page. Site information"><Info size={14} /></button>;
+          if (security === "secure") return <button {...props} className="address-security is-secure" title="Connection is secure. Site information"><LockKeyhole size={18} /></button>;
+          if (security === "cert") return <button {...props} className="address-security is-insecure" title="Certificate problem. Site information"><ShieldAlert size={18} /><em>Not secure</em></button>;
+          if (security === "insecure") return <button {...props} className="address-security is-insecure" title="Not secure: this page doesn't use HTTPS. Site information"><LockKeyholeOpen size={18} /><em>Not secure</em></button>;
+          return <button {...props} className="address-security" title="Local page. Site information"><Info size={18} /></button>;
         })()}
         <input
           value={shown}
@@ -131,12 +127,12 @@ export function Toolbar({ tab, fullUrls, zoom, onResetZoom, bookmarked, onToggle
         />
         {logins && (
           <button type="button" className={`address-key ${logins.locked ? "is-locked" : ""}`} onMouseDown={(event) => event.preventDefault()} onClick={onOpenLogins} title={logins.locked ? "Passwords are locked" : `${logins.count} saved login${logins.count === 1 ? "" : "s"} for this site`}>
-            <KeyRound size={14} />{!logins.locked && logins.count > 1 && <em>{logins.count}</em>}
+            <KeyRound size={18} />{!logins.locked && logins.count > 1 && <em>{logins.count}</em>}
           </button>
         )}
         {bookmarked !== undefined && (
           <button type="button" className={`address-star ${bookmarked ? "is-on" : ""}`} onMouseDown={(event) => event.preventDefault()} onClick={onToggleBookmark} title={bookmarked ? "Remove bookmark (Ctrl+D)" : "Bookmark this page (Ctrl+D)"} aria-pressed={bookmarked}>
-            <Star size={14} fill={bookmarked ? "currentColor" : "none"} />
+            <Star size={18} fill={bookmarked ? "currentColor" : "none"} />
           </button>
         )}
         {zoom !== undefined && <button type="button" className="zoom-pill" onClick={onResetZoom} title="Reset zoom (Ctrl+0)">{Math.round(zoom * 100)}%</button>}
@@ -148,11 +144,11 @@ export function Toolbar({ tab, fullUrls, zoom, onResetZoom, bookmarked, onToggle
         )}
       </form>
       <div className="toolbar-actions" data-tauri-drag-region>
-        <IconButton label="Command palette (Ctrl+K)" onClick={onMore}><MoreHorizontal size={19} /></IconButton>
+        <IconButton label="Command palette (Ctrl+K)" onClick={onMore}><MoreHorizontal size={24} /></IconButton>
         <div className="window-controls">
-          <button aria-label="Minimize" onClick={() => windowAction("minimize")}><Minus size={14} /></button>
-          <button aria-label="Maximize" onClick={() => windowAction("maximize")}><Square size={11} /></button>
-          <button className="window-close" aria-label="Close" onClick={() => windowAction("close")}><X size={14} /></button>
+          <button aria-label="Minimize" onClick={() => windowAction("minimize")}><Minus size={18} /></button>
+          <button aria-label="Maximize" onClick={() => windowAction("maximize")}><Square size={14} /></button>
+          <button className="window-close" aria-label="Close" onClick={() => windowAction("close")}><X size={18} /></button>
         </div>
       </div>
       {loading && <div className="load-bar" aria-hidden="true" />}

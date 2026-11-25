@@ -45,9 +45,23 @@ pub fn vault_status(vault: State<'_, Vault>, store: State<'_, Store>) -> Result<
 #[tauri::command]
 pub async fn vault_create(app: AppHandle, password: Zeroizing<String>) -> Result<()> {
     let handle = app.clone();
-    blocking(app, move |vault, store| vault.create(store, &password)).await?;
+    blocking(app, move |vault, store| {
+        vault.create(store, &password)?;
+        // No master password in everyday use; it still guards viewing, exporting and new devices.
+        let _ = vault.set_remember(store, true);
+        Ok(())
+    })
+    .await?;
     changed(&handle);
     Ok(())
+}
+
+/// Unlocks with this device's stored key when "remember on this device" is on,
+/// so saving and filling never ask for the master password.
+pub(crate) fn auto_unlock(app: &AppHandle, vault: &Vault, store: &Store) {
+    if vault.unlock_if_remembered(store) {
+        changed(app);
+    }
 }
 
 #[tauri::command]
@@ -99,13 +113,15 @@ pub fn vault_reset(app: AppHandle, vault: State<'_, Vault>, store: State<'_, Sto
 }
 
 #[tauri::command]
-pub fn vault_list(vault: State<'_, Vault>) -> Result<Vec<EntryMeta>> {
+pub fn vault_list(app: AppHandle, vault: State<'_, Vault>, store: State<'_, Store>) -> Result<Vec<EntryMeta>> {
+    auto_unlock(&app, &vault, &store);
     vault.list()
 }
 
 /// Logins saved for the exact origin of `url`.
 #[tauri::command]
-pub fn vault_matches(vault: State<'_, Vault>, url: String) -> Result<Vec<EntryMeta>> {
+pub fn vault_matches(app: AppHandle, vault: State<'_, Vault>, store: State<'_, Store>, url: String) -> Result<Vec<EntryMeta>> {
+    auto_unlock(&app, &vault, &store);
     match vault::origin_of(&url) {
         Some(origin) => vault.matches(&origin),
         None => Ok(Vec::new()),
@@ -114,6 +130,7 @@ pub fn vault_matches(vault: State<'_, Vault>, url: String) -> Result<Vec<EntryMe
 
 #[tauri::command]
 pub fn vault_add(app: AppHandle, vault: State<'_, Vault>, store: State<'_, Store>, input: EntryInput) -> Result<EntryMeta> {
+    auto_unlock(&app, &vault, &store);
     let meta = vault.add(&store, &input)?;
     changed(&app);
     Ok(meta)
@@ -121,6 +138,7 @@ pub fn vault_add(app: AppHandle, vault: State<'_, Vault>, store: State<'_, Store
 
 #[tauri::command]
 pub fn vault_update(app: AppHandle, vault: State<'_, Vault>, store: State<'_, Store>, id: String, input: EntryInput) -> Result<EntryMeta> {
+    auto_unlock(&app, &vault, &store);
     let meta = vault.update(&store, &id, &input)?;
     changed(&app);
     Ok(meta)
@@ -128,6 +146,7 @@ pub fn vault_update(app: AppHandle, vault: State<'_, Vault>, store: State<'_, St
 
 #[tauri::command]
 pub fn vault_delete(app: AppHandle, vault: State<'_, Vault>, store: State<'_, Store>, id: String) -> Result<()> {
+    auto_unlock(&app, &vault, &store);
     vault.delete(&store, &id)?;
     changed(&app);
     Ok(())
@@ -166,7 +185,8 @@ fn copy_then_clear(text: Zeroizing<String>) -> Result<()> {
 
 /// Copies a login's username or password without sending it to the UI.
 #[tauri::command]
-pub fn vault_copy(vault: State<'_, Vault>, store: State<'_, Store>, id: String, field: String) -> Result<()> {
+pub fn vault_copy(app: AppHandle, vault: State<'_, Vault>, store: State<'_, Store>, id: String, field: String) -> Result<()> {
+    auto_unlock(&app, &vault, &store);
     let (meta, password) = vault.credentials(&store, &id)?;
     let text = if field == "username" { Zeroizing::new(meta.username.clone()) } else { password };
     copy_then_clear(text)
@@ -190,6 +210,7 @@ fn fill_script(username: Option<&str>, password: &str, new_password: bool) -> Re
 #[tauri::command]
 pub fn vault_fill(app: AppHandle, vault: State<'_, Vault>, store: State<'_, Store>, label: String, id: String) -> Result<()> {
     let (webview, origin) = page_origin(&app, &label)?;
+    auto_unlock(&app, &vault, &store);
     let (meta, password) = vault.credentials(&store, &id)?;
     if meta.origin != origin {
         return Err("that login is for a different site".into());
@@ -201,8 +222,9 @@ pub fn vault_fill(app: AppHandle, vault: State<'_, Vault>, store: State<'_, Stor
 /// Fills a new strong password into a sign-up or change-password form and
 /// offers to save it.
 #[tauri::command]
-pub fn vault_fill_generated(app: AppHandle, vault: State<'_, Vault>, label: String, length: usize, symbols: bool) -> Result<Option<LoginOffer>> {
+pub fn vault_fill_generated(app: AppHandle, vault: State<'_, Vault>, store: State<'_, Store>, label: String, length: usize, symbols: bool) -> Result<Option<LoginOffer>> {
     let (webview, origin) = page_origin(&app, &label)?;
+    auto_unlock(&app, &vault, &store);
     let password = vault::generate_password(length, symbols);
     let script = Zeroizing::new(fill_script(None, &password, true)?);
     webview.eval(script.as_str()).map_err(|error| error.to_string())?;
@@ -218,12 +240,16 @@ pub fn vault_generate(length: usize, symbols: bool) -> Result<Zeroizing<String>>
 }
 
 #[tauri::command]
-pub fn vault_offer_recheck(vault: State<'_, Vault>, pending_id: String) -> Result<LoginOffer> {
+pub fn vault_offer_recheck(app: AppHandle, vault: State<'_, Vault>, store: State<'_, Store>, pending_id: String) -> Result<LoginOffer> {
+    auto_unlock(&app, &vault, &store);
     vault.recheck_offer(&pending_id)
 }
 
 #[tauri::command]
 pub fn vault_resolve_offer(app: AppHandle, vault: State<'_, Vault>, store: State<'_, Store>, pending_id: String, discard: bool) -> Result<()> {
+    if !discard {
+        auto_unlock(&app, &vault, &store);
+    }
     vault.resolve_offer(&store, &pending_id, discard)?;
     if !discard {
         changed(&app);

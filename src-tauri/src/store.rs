@@ -309,6 +309,12 @@ pub fn kv_set_many(store: State<'_, Store>, entries: std::collections::HashMap<S
     })
 }
 
+/// Removes one key (a closed window's saved tabs).
+#[tauri::command]
+pub fn kv_delete(store: State<'_, Store>, key: String) -> Result<usize> {
+    store.with(|c| c.execute("DELETE FROM kv WHERE key = ?1", [key]))
+}
+
 /// Removes every key starting with `prefix` (used by Reset Sleet).
 #[tauri::command]
 pub fn kv_delete_prefix(store: State<'_, Store>, prefix: String) -> Result<usize> {

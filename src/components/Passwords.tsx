@@ -81,6 +81,11 @@ export function PasswordsPanel({ settings, onChange, onOpenList }: { settings: S
     try { await work(); } catch (reason) { setError(vaultError(reason)); } finally { setBusy(false); }
   };
 
+  // Remembered device: opening Passwords unlocks without the master password.
+  useEffect(() => {
+    if (status?.exists && !status.unlocked && status.remembered) void vaultUnlockDevice().catch(() => undefined);
+  }, [status?.exists, status?.unlocked, status?.remembered]);
+
   if (!status) return <div className="settings-card"><Row label="Loading…" /></div>;
 
   if (!status.exists) {
@@ -105,7 +110,7 @@ export function PasswordsPanel({ settings, onChange, onOpenList }: { settings: S
   if (!status.unlocked) {
     return (
       <div className="settings-card vault-card">
-        <Row label="Passwords are locked" detail={`Unlock with your master password to save, fill or manage passwords.${status.retryIn > 0 ? ` Too many wrong attempts — wait ${status.retryIn} s.` : ""}`}><Lock size={16} /></Row>
+        <Row label="Passwords are locked" detail={`Unlock with your master password to save, fill or manage passwords.${status.retryIn > 0 ? ` Too many wrong attempts — wait ${status.retryIn} s.` : ""}`}><Lock size={20} /></Row>
         <form className="vault-fields" onSubmit={(event) => { event.preventDefault(); void run(async () => { await vaultUnlock(password); setPassword(""); }); }}>
           <label>Master password<input type="password" autoFocus value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" /></label>
           {error && <span className="vault-error">{error}</span>}
@@ -126,14 +131,14 @@ export function PasswordsPanel({ settings, onChange, onOpenList }: { settings: S
     <>
       <div className="settings-card">
         <Row label="Saved passwords" detail={`${status.count} saved, encrypted on this device`}><button className="settings-button is-primary" onClick={onOpenList}>Open</button></Row>
-        <Row label="Lock passwords now" detail="Sleet locks them by itself after the time below."><button className="settings-button" onClick={() => void vaultLock()}><Lock size={13} /> Lock</button></Row>
+        <Row label="Lock passwords now" detail={status.remembered ? "Clears them from memory. On this remembered device Sleet unlocks again by itself when needed." : "Sleet locks them by itself after the time below."}><button className="settings-button" onClick={() => void vaultLock()}><Lock size={16} /> Lock</button></Row>
         <Row label="Lock after">
           <select className="settings-select" aria-label="Lock after" value={settings.vaultAutoLock} onChange={(event) => onChange({ vaultAutoLock: Number(event.target.value) })}>
             {[1, 5, 15, 30, 60, 240].map((minutes) => <option key={minutes} value={minutes}>{minutes < 60 ? `${minutes} min` : `${minutes / 60} h`} unused</option>)}
             <option value={0}>Never (not recommended)</option>
           </select>
         </Row>
-        <Row label="Remember on this device" detail="Unlock without the master password, using this computer's secure store (Credential Manager, Keychain or keyring). Anyone signed in to this computer account could unlock.">
+        <Row label="Remember on this device" detail="Save and fill passwords without the master password, using this computer's secure store (Credential Manager, Keychain or keyring). Viewing, exporting and changing the master password still ask. Anyone signed in to this computer account could use your saved logins.">
           <button className={`toggle ${status.remembered ? "is-on" : ""}`} role="switch" aria-checked={status.remembered} aria-label="Remember on this device" onClick={() => void run(() => vaultSetRemember(!status.remembered))}><i /></button>
         </Row>
         <Row label="Change master password">
@@ -163,7 +168,7 @@ export function PasswordsPanel({ settings, onChange, onOpenList }: { settings: S
           <select className="settings-select" aria-label="Generated password length" value={settings.generatorLength} onChange={(event) => onChange({ generatorLength: Number(event.target.value) })}>
             {[16, 20, 24, 32, 48].map((length) => <option key={length} value={length}>{length} characters</option>)}
           </select>
-          <button className="settings-button" onClick={() => void vaultGenerate(settings.generatorLength, true).then(setGenerated).catch((reason) => setError(vaultError(reason)))}><KeyRound size={13} /> Generate</button>
+          <button className="settings-button" onClick={() => void vaultGenerate(settings.generatorLength, true).then(setGenerated).catch((reason) => setError(vaultError(reason)))}><KeyRound size={16} /> Generate</button>
         </Row>
       </div>
 
@@ -233,7 +238,8 @@ export function PasswordList() {
   // Revealed passwords hide again after 30 seconds.
   useEffect(() => { if (!revealed) return; const timer = window.setTimeout(() => setRevealed(null), 30_000); return () => window.clearTimeout(timer); }, [revealed]);
 
-  if (status && !status.unlocked) return <div className="settings-card"><Row label="Passwords are locked" detail="Go back and unlock them first." /></div>;
+  // A remembered device unlocks itself when the list loads.
+  if (status && !status.unlocked && !status.remembered) return <div className="settings-card"><Row label="Passwords are locked" detail="Go back and unlock them first." /></div>;
 
   const text = query.trim().toLowerCase();
   const shown = text ? entries.filter((entry) => `${entry.origin} ${entry.username} ${entry.title}`.toLowerCase().includes(text)) : entries;
@@ -265,8 +271,8 @@ export function PasswordList() {
   return (
     <div className="vault-list">
       <div className="vault-list-tools">
-        <label className="settings-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search passwords" aria-label="Search passwords" /></label>
-        <button className="settings-button is-primary" onClick={() => setEditing({ id: null, url: "", username: "", password: "", notes: "" })}><Plus size={13} /> Add</button>
+        <label className="settings-search"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search passwords" aria-label="Search passwords" /></label>
+        <button className="settings-button is-primary" onClick={() => setEditing({ id: null, url: "", username: "", password: "", notes: "" })}><Plus size={16} /> Add</button>
       </div>
       {error && <p className="vault-error">{error}</p>}
       {editing && !editing.id && <div className="settings-card">{editor}</div>}
@@ -278,10 +284,10 @@ export function PasswordList() {
               <SiteIcon url={entry.origin} title={entry.title} className="library-site-icon" />
               <span className="settings-copy"><strong>{entry.title || host(entry.origin)}</strong><small>{entry.username || "(no username)"} · {host(entry.origin)}</small></span>
               <span className="vault-entry-actions">
-                <button title="Copy username" aria-label={`Copy username for ${host(entry.origin)}`} onClick={() => copy(entry, "username")}>{copied === `${entry.id}:username` ? "✓" : <Copy size={13} />}</button>
-                <button title="Copy password (clears from the clipboard in 30 s)" aria-label={`Copy password for ${host(entry.origin)}`} onClick={() => copy(entry, "password")}>{copied === `${entry.id}:password` ? "✓" : <KeyRound size={13} />}</button>
-                <button title="Show password" aria-label={`Show password for ${host(entry.origin)}`} onClick={() => { setRevealed(null); setRevealing(entry.id); }}><Eye size={13} /></button>
-                <button title="Edit" aria-label={`Edit ${host(entry.origin)}`} onClick={() => setEditing({ id: entry.id, url: entry.origin, username: entry.username, password: "", notes: "" })}><Pencil size={13} /></button>
+                <button title="Copy username" aria-label={`Copy username for ${host(entry.origin)}`} onClick={() => copy(entry, "username")}>{copied === `${entry.id}:username` ? "✓" : <Copy size={16} />}</button>
+                <button title="Copy password (clears from the clipboard in 30 s)" aria-label={`Copy password for ${host(entry.origin)}`} onClick={() => copy(entry, "password")}>{copied === `${entry.id}:password` ? "✓" : <KeyRound size={16} />}</button>
+                <button title="Show password" aria-label={`Show password for ${host(entry.origin)}`} onClick={() => { setRevealed(null); setRevealing(entry.id); }}><Eye size={16} /></button>
+                <button title="Edit" aria-label={`Edit ${host(entry.origin)}`} onClick={() => setEditing({ id: entry.id, url: entry.origin, username: entry.username, password: "", notes: "" })}><Pencil size={16} /></button>
                 <DeleteEntry onDelete={() => void vaultDelete(entry.id).then(load).catch((reason) => setError(vaultError(reason)))} />
               </span>
             </div>
@@ -300,5 +306,5 @@ export function PasswordList() {
 function DeleteEntry({ onDelete }: { onDelete: () => void }) {
   const [armed, setArmed] = useState(false);
   useEffect(() => { if (!armed) return; const timer = window.setTimeout(() => setArmed(false), 4000); return () => window.clearTimeout(timer); }, [armed]);
-  return <button className={armed ? "is-armed" : ""} title={armed ? "Click again to delete" : "Delete"} aria-label="Delete" onClick={() => { if (armed) onDelete(); else setArmed(true); }}>{armed ? "Delete?" : <Trash2 size={13} />}</button>;
+  return <button className={armed ? "is-armed" : ""} title={armed ? "Click again to delete" : "Delete"} aria-label="Delete" onClick={() => { if (armed) onDelete(); else setArmed(true); }}>{armed ? "Delete?" : <Trash2 size={16} />}</button>;
 }

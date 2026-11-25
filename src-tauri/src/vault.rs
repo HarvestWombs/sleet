@@ -456,6 +456,15 @@ impl Vault {
         Ok(())
     }
 
+    /// "Remember on this device": unlocks silently with the key in the OS secure
+    /// store whenever saved passwords are needed. Returns true if it just unlocked.
+    pub fn unlock_if_remembered(&self, store: &Store) -> bool {
+        if self.inner().unlocked.is_some() {
+            return false;
+        }
+        matches!(meta_row(store), Ok(Some(row)) if row.remember) && self.unlock_with_device(store).is_ok()
+    }
+
     /// Forgets the key and decrypted metadata (both are wiped on drop).
     pub fn lock(&self) {
         let mut inner = self.inner();
@@ -936,6 +945,18 @@ mod tests {
         assert!(vault.offer("https://z.test", "zed", "pw").is_none(), "same submission twice");
         vault.resolve_offer(&store, &offer.pending_id, false).unwrap();
         assert_eq!(vault.offer("https://z.test", "zed", "pw2").unwrap().kind, "update");
+    }
+
+    #[test]
+    fn silent_unlock_only_on_a_remembered_device() {
+        let store = test_store();
+        let vault = Vault::default();
+        vault.create(&store, "device password").unwrap();
+        vault.lock();
+        // Not remembered: stays locked, nothing usable without the master password.
+        assert!(!vault.unlock_if_remembered(&store));
+        assert!(vault.list().is_err());
+        assert_eq!(vault.offer("https://a.test", "u", "p").unwrap().kind, "locked");
     }
 
     #[test]

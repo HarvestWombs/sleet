@@ -248,7 +248,7 @@ mod imp {
                     let origin = super::origin_of(&opener).unwrap_or_default();
                     let allowed_site = !private && stored_permission(&popup_app, &origin, "popups").as_deref() == Some("allow");
                     if user.as_bool() || allowed_site || !BLOCK_POPUPS.load(Ordering::Relaxed) {
-                        let _ = popup_app.emit("sleet-new-tab", url);
+                        let _ = popup_app.emit("sleet-new-tab", serde_json::json!({ "label": popup_label, "url": url }));
                     } else {
                         let _ = popup_app.emit("sleet-popup-blocked", PopupBlocked { label: popup_label.clone(), url, origin });
                     }

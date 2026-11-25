@@ -28,9 +28,9 @@ export function LoginsMenu({ items, onPick, variant = "inline" }: { items: Login
         >
           <span className="logins-icon">
             {item.kind === "login" ? <SiteIcon url={item.origin} title={item.title} className="bm-icon" />
-              : item.kind === "generate" ? <Sparkles size={14} />
-              : item.kind === "unlock" ? <Lock size={14} />
-              : item.kind === "manage" ? <Settings2 size={14} /> : <KeyRound size={14} />}
+              : item.kind === "generate" ? <Sparkles size={18} />
+              : item.kind === "unlock" ? <Lock size={18} />
+              : item.kind === "manage" ? <Settings2 size={18} /> : <KeyRound size={18} />}
           </span>
           <span className="logins-copy"><strong>{item.title}</strong>{item.subtitle && <small>{item.subtitle}</small>}</span>
         </button>

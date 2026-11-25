@@ -15,7 +15,8 @@ tauri-build = { version = "3.0.0-alpha.4", features = [] }
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = { version = "3.0.0-alpha.6", features = ["unstable"] }
+# "devtools": page developer tools (Settings → Advanced, F12) in installed builds too, not only debug builds.
+tauri = { version = "3.0.0-alpha.6", features = ["unstable", "devtools"] }
 tauri-runtime-wry = { version = "3.0.0-alpha.6", features = ["unstable"] }
 url = "2"
 rusqlite = { version = "0.37", features = ["bundled"] }
@@ -28,6 +29,9 @@ arboard = { version = "3", default-features = false }
 csv = "1"
 # Signed in-app updates (switched on only when an update key is configured).
 tauri-plugin-updater = "3.0.0-alpha.3"
+ureq = "3"
+# Native Save as dialog for "Ask where to save each file".
+rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 webview2-com = "0.39"
@@ -50,6 +54,4 @@ features = ["sync-secret-service", "crypto-rust"]
 
 # Argon2 is deliberately expensive; unoptimised debug builds would make unlocking take many seconds.
 [profile.dev.package.argon2]
-opt-level = 3
-[profile.dev.package.blake2]
 opt-level = 3

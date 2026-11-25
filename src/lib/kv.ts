@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { emit, listen } from "@tauri-apps/api/event";
 
 /**
  * Sleet's own saved state (tabs, settings, layout, favicons). In the desktop
@@ -18,6 +19,38 @@ const isTauri = () => "__TAURI_INTERNALS__" in window;
 
 let cache: Record<string, string> = {};
 const pending = new Map<string, number>();
+
+/**
+ * Several Sleet windows share this state, each with its own copy in memory.
+ * Every change is announced to the other windows straight away, so none of
+ * them writes back a stale value later.
+ */
+const KV_CHANGED = "sleet-kv-changed";
+const SOURCE = Math.random().toString(36).slice(2);
+const watchers = new Map<string, Set<() => void>>();
+const announce = (key: string, value: string | null) => {
+  if (isTauri()) void emit(KV_CHANGED, { key, value, source: SOURCE }).catch(() => undefined);
+};
+
+/** Calls `onChange` when another window changes `key`. Returns the unsubscribe function. */
+export function kvSubscribe(key: string, onChange: () => void) {
+  const set = watchers.get(key) ?? new Set();
+  set.add(onChange);
+  watchers.set(key, set);
+  return () => { set.delete(onChange); };
+}
+
+function listenForOtherWindows() {
+  void listen<{ key: string; value: string | null; source: string }>(KV_CHANGED, ({ payload }) => {
+    if (payload.source === SOURCE) return;
+    // Theirs is newer than anything this window still has waiting to write.
+    window.clearTimeout(pending.get(payload.key));
+    pending.delete(payload.key);
+    if (payload.value === null) delete cache[payload.key];
+    else cache[payload.key] = payload.value;
+    watchers.get(payload.key)?.forEach((onChange) => onChange());
+  });
+}
 
 const isState = (key: string) => {
   const prefix = key.startsWith(PREFIX) ? PREFIX : key.startsWith(OLD_PREFIX) ? OLD_PREFIX : null;
@@ -40,6 +73,7 @@ const fromLocalStorage = () => {
 /** Loads saved state; on first run moves it over from localStorage. */
 export async function loadKv() {
   if (!isTauri()) { cache = fromLocalStorage(); return; }
+  listenForOtherWindows();
   try {
     cache = await invoke<Record<string, string>>("kv_all");
     // Rename: values saved as horizon.* become sleet.* (new values win).
@@ -70,6 +104,7 @@ export function kvSet(key: string, value: string) {
   if (cache[key] === value) return;
   cache[key] = value;
   if (!isTauri()) { try { localStorage.setItem(key, value); } catch { /* ignore */ } return; }
+  announce(key, value);
   window.clearTimeout(pending.get(key));
   pending.set(key, window.setTimeout(() => {
     pending.delete(key);
@@ -84,6 +119,20 @@ export function kvGetJson<T>(key: string, fallback: T): T {
 }
 
 export const kvSetJson = (key: string, value: unknown) => kvSet(key, JSON.stringify(value));
+
+/** Saved keys starting with `prefix`. */
+export const kvKeys = (prefix: string) => Object.keys(cache).filter((key) => key.startsWith(prefix));
+
+/** Removes one saved key. */
+export function kvDelete(key: string) {
+  if (!(key in cache)) return;
+  delete cache[key];
+  window.clearTimeout(pending.get(key));
+  pending.delete(key);
+  if (!isTauri()) { try { localStorage.removeItem(key); } catch { /* ignore */ } return; }
+  announce(key, null);
+  void invoke("kv_delete", { key }).catch(() => undefined);
+}
 
 /** Writes everything still waiting (e.g. before closing). */
 export async function kvFlush() {

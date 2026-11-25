@@ -69,11 +69,11 @@ export function useTooltips(): TooltipState | null {
 
 /** Where a tooltip of `width`×`height` goes for a mouse at (x, y): below-right, flipped to stay on screen. */
 export function tooltipPosition(tip: { x: number; y: number }, width: number, height: number) {
-  const offsetX = 12;
-  const offsetY = 18; // roughly the cursor's height
+  const offsetX = 15;
+  const offsetY = 22; // roughly the cursor's height
   let left = tip.x + offsetX;
   let top = tip.y + offsetY;
-  if (left + width > window.innerWidth - 4) left = Math.max(4, tip.x - width - 4);
-  if (top + height > window.innerHeight - 4) top = Math.max(4, tip.y - height - 6);
+  if (left + width > window.innerWidth - 5) left = Math.max(5, tip.x - width - 5);
+  if (top + height > window.innerHeight - 5) top = Math.max(5, tip.y - height - 8);
   return { left, top };
 }

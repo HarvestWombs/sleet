@@ -24,6 +24,12 @@ export interface Settings {
   downloadToasts: boolean;
   toastSeconds: number;
   clearCompletedDownloads: boolean;
+  /** Show a Save as dialog for every download instead of saving straight to the folder. */
+  downloadAsk: boolean;
+  /** File extensions (lowercase, no dot) opened automatically when their download finishes. */
+  autoOpenTypes: string[];
+  /** File types (lowercase, no dot) kept without asking when Windows warns they can be harmful. */
+  trustedDownloadTypes: string[];
   inactiveMinutes: number;
   userAgent: string;
   trackingPrevention: "none" | "basic" | "balanced" | "strict";
@@ -45,8 +51,12 @@ export interface Settings {
   generatorLength: number;
   /** "Not now" on the default-browser prompt: never ask again (Settings still offers it). */
   defaultBrowserPromptDismissed: boolean;
+  /** Answered the one-time "remember this device" offer for passwords. */
+  rememberDevicePromptDismissed: boolean;
   /** "Always allow" answers for links that open other apps, as `origin|scheme`. */
   externalAllowed: string[];
+  /** Set once saved sizes were converted after Sleet's sizes grew 25% (see UI_SCALE). */
+  uiScale?: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -66,6 +76,9 @@ export const DEFAULT_SETTINGS: Settings = {
   downloadToasts: true,
   toastSeconds: 5,
   clearCompletedDownloads: false,
+  downloadAsk: false,
+  autoOpenTypes: [],
+  trustedDownloadTypes: [],
   inactiveMinutes: 5,
   trackingPrevention: "balanced",
   httpsOnly: false,
@@ -77,6 +90,7 @@ export const DEFAULT_SETTINGS: Settings = {
   toastPosition: "top-left",
   defaultBrowserPromptDismissed: false,
   externalAllowed: [],
+  rememberDevicePromptDismissed: false,
   passwordsOffer: true,
   passwordsNever: [],
   vaultAutoLock: 15,
@@ -94,6 +108,8 @@ export const SEARCH_ENGINES: Record<SearchEngineId, { name: string; url: string 
 
 export const ZOOM_LEVELS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3];
 export const APP_ZOOM_LEVELS = [0.8, 0.9, 1, 1.1, 1.25, 1.5];
+/** Sleet's sizes were enlarged 25% once (the old 125% is the new 100%); see applyLaunchSettings. */
+const UI_SCALE = 1.25;
 export const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
 
 /** Next zoom level up or down from `current`. */
@@ -125,6 +141,20 @@ export function pruneHistory<T extends { visitedAt: number }>(items: T[], retent
 export function applyLaunchSettings() {
   const settings = readSettings();
   try {
+    // Sleet's sizes grew 25% (the old 125% is the new 100%). Keep what people
+    // had: an enlarged interface zoom comes down, a dragged sidebar width scales up.
+    if (settings.uiScale !== UI_SCALE) {
+      const stored = kvGetJson<Partial<Settings> & { appZoomBase?: number }>(SETTINGS_KEY, {});
+      // `appZoomBase` marks a build that had already brought interface zoom down.
+      const target = settings.appZoom / UI_SCALE;
+      const appZoom = stored.appZoomBase === undefined && settings.appZoom > 1
+        ? APP_ZOOM_LEVELS.reduce((best, level) => (Math.abs(level - target) < Math.abs(best - target) ? level : best), 1)
+        : settings.appZoom;
+      delete stored.appZoomBase;
+      kvSetJson(SETTINGS_KEY, { ...stored, appZoom, uiScale: UI_SCALE });
+      const width = kvGetJson<number>("sleet.sidebar-width", 0);
+      if (width > 0) kvSetJson("sleet.sidebar-width", Math.round(width * UI_SCALE));
+    }
     if (settings.startup !== "restore") {
       const url = settings.startup === "page" ? settings.startupPage || HOME_URL : settings.newTabPage || HOME_URL;
       const id = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
