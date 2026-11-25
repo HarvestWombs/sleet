@@ -1,4 +1,4 @@
-# Builds Sleet for Windows, macOS and Linux and attaches the installers to a
+# Builds Sleet for Windows and Linux and attaches the installers to a
 # draft GitHub release. Publish the draft to ship it: installed copies of Sleet
 # check the latest published release for updates.
 #
@@ -31,6 +31,9 @@ jobs:
     name: Build (${{ matrix.name }})
     strategy:
       fail-fast: false
+      # tauri-action updates one shared draft and latest.json. Running the
+      # platform uploads concurrently can create two drafts for the same tag.
+      max-parallel: 1
       matrix:
         include:
           - name: Windows
