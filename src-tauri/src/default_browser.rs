@@ -1,14 +1,9 @@
-//! Default-browser registration (Windows), opening links passed on the
-//! command line, and forwarding them to an already running Sleet so links
-//! from other apps open as tabs instead of a second window.
+//! Default-browser registration (Windows) and opening links passed on the
+//! command line. A link clicked in another app starts `sleet.exe <link>`; when
+//! Sleet is already running, the single-instance plugin (see lib.rs) hands the
+//! link to it and the new process exits, so the link opens as a tab.
 
-use std::{
-    io::{BufRead, BufReader, Write},
-    net::{SocketAddr, TcpListener, TcpStream},
-    path::PathBuf,
-    sync::Mutex,
-    time::Duration,
-};
+use std::sync::Mutex;
 use tauri::{AppHandle, Emitter};
 
 /// Links Sleet was started with, handed to the UI once it is ready.
@@ -25,66 +20,31 @@ pub fn urls_from_args(args: impl Iterator<Item = String>) -> Vec<String> {
     .collect()
 }
 
-fn instance_file() -> Option<PathBuf> {
-    let base = std::env::var_os("APPDATA").or_else(|| std::env::var_os("HOME"))?;
-    Some(PathBuf::from(base).join("com.sleet.browser").join("instance"))
+/// Another launch of Sleet (a link clicked in another app) passed its command
+/// line here: bring Sleet forward and open its links in the window used last.
+pub fn open_from_other_launch(app: &AppHandle, argv: Vec<String>) {
+    let urls = urls_from_args(argv.into_iter().skip(1));
+    let Some(window) = crate::windows::focused_window(app) else { return };
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+    if !urls.is_empty() {
+        let _ = app.emit("sleet-open-urls", serde_json::json!({ "window": window.label(), "urls": urls }));
+    }
 }
 
-/// If Sleet is already running, sends it `urls` and returns true (this
-/// process should then exit). The running instance listens on localhost and
-/// requires the secret stored next to its port.
-pub fn forward_to_running(urls: &[String]) -> bool {
-    let Some(file) = instance_file() else { return false };
-    let Ok(contents) = std::fs::read_to_string(file) else { return false };
-    let mut parts = contents.split_whitespace();
-    let (Some(port), Some(secret)) = (parts.next(), parts.next()) else { return false };
-    let Ok(port) = port.parse::<u16>() else { return false };
-    let address = SocketAddr::from(([127, 0, 0, 1], port));
-    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(400)) else { return false };
-    let message = serde_json::json!({ "secret": secret, "urls": urls }).to_string();
-    stream.write_all(message.as_bytes()).is_ok() && stream.write_all(b"\n").is_ok()
+/// Removes the hand-off file older versions used (`<app data>/instance`).
+pub fn remove_old_instance_file() {
+    if let Some(base) = std::env::var_os("APPDATA").or_else(|| std::env::var_os("HOME")) {
+        let _ = std::fs::remove_file(std::path::PathBuf::from(base).join("com.sleet.browser").join("instance"));
+    }
 }
 
-/// Accepts links from later launches and opens them in this window.
-pub fn listen_for_other_launches(app: AppHandle) {
-    let Some(file) = instance_file() else { return };
-    let Ok(listener) = TcpListener::bind(("127.0.0.1", 0)) else { return };
-    let Ok(port) = listener.local_addr().map(|address| address.port()) else { return };
-    let secret = format!("{:x}{:x}", std::process::id(), std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|time| time.as_nanos())
-        .unwrap_or_default());
-    if let Some(dir) = file.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if std::fs::write(&file, format!("{port} {secret}")).is_err() {
-        return;
-    }
-    std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-            let mut line = String::new();
-            if BufReader::new(&stream).read_line(&mut line).is_err() {
-                continue;
-            }
-            let Ok(message) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
-            if message["secret"].as_str() != Some(secret.as_str()) {
-                continue;
-            }
-            let urls: Vec<String> = message["urls"]
-                .as_array()
-                .map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_string)).collect())
-                .unwrap_or_default();
-            let urls = urls_from_args(urls.into_iter());
-            // Links from other apps open in the Sleet window used last.
-            let Some(window) = crate::windows::focused_window(&app) else { continue };
-            let _ = window.unminimize();
-            let _ = window.set_focus();
-            if !urls.is_empty() {
-                let _ = app.emit("sleet-open-urls", serde_json::json!({ "window": window.label(), "urls": urls }));
-            }
-        }
-    });
+/// Installed Sleet keeps link registration pointing at itself: after an
+/// update or a move, or when a development build registered itself, links
+/// would otherwise start a different `sleet.exe`. (Release builds only.)
+#[cfg_attr(debug_assertions, allow(dead_code))]
+pub fn repair_registration() {
+    imp::repair();
 }
 
 #[cfg(target_os = "windows")]
@@ -145,6 +105,21 @@ mod imp {
         Ok(())
     }
 
+    /// Re-registers when Sleet is registered for links but under another program path.
+    #[cfg_attr(debug_assertions, allow(dead_code))]
+    pub fn repair() {
+        let Ok(exe) = std::env::current_exe() else { return };
+        let expected = format!("\"{}\" \"%1\"", exe.display());
+        let registered = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey(format!(r"Software\Classes\{PROG_ID}\shell\open\command"))
+            .and_then(|key| key.get_value::<String, _>(""));
+        if let Ok(command) = registered {
+            if !command.eq_ignore_ascii_case(&expected) {
+                let _ = register();
+            }
+        }
+    }
+
     /// Opens Windows' default apps page for Sleet (Windows 11 deep link;
     /// Windows 10 shows the general default apps page).
     pub fn open_settings() -> Result<(), String> {
@@ -167,6 +142,8 @@ mod imp {
     pub fn is_default() -> bool { false }
     pub fn register() -> Result<(), String> { Err("setting the default browser is only supported on Windows for now".into()) }
     pub fn open_settings() -> Result<(), String> { Ok(()) }
+    #[cfg_attr(debug_assertions, allow(dead_code))]
+    pub fn repair() {}
 }
 
 #[derive(serde::Serialize)]

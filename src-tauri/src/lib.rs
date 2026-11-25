@@ -718,13 +718,16 @@ fn migrate_from_horizon() {
 pub fn run() {
     migrate_from_horizon();
 
-    // A link clicked in another app while Sleet is open goes to that window.
+    // Links Sleet was started with (when it wasn't running yet).
     let launch_urls = default_browser::urls_from_args(std::env::args().skip(1));
-    if default_browser::forward_to_running(&launch_urls) {
-        return;
-    }
+    default_browser::remove_old_instance_file();
 
     tauri::Builder::default()
+        // First, so a second launch (a link clicked in another app while Sleet
+        // runs) hands its links to this one and exits before opening anything.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            default_browser::open_from_other_launch(app, argv);
+        }))
         .manage(default_browser::LaunchUrls(std::sync::Mutex::new(launch_urls)))
         .runtime(tauri_runtime_wry::Wry::default())
         .manage(DownloadDir::default())
@@ -745,7 +748,10 @@ pub fn run() {
             app.manage(store);
             app.manage(vault::Vault::default());
             vault_commands::start_auto_lock(app.handle().clone());
-            default_browser::listen_for_other_launches(app.handle().clone());
+            // Installed builds keep link registration pointing at themselves
+            // (development builds leave it alone, so `tauri dev` doesn't take links over).
+            #[cfg(not(debug_assertions))]
+            default_browser::repair_registration();
             browsing::init_updater(app);
             Ok(())
         })

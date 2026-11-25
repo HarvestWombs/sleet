@@ -1,6 +1,6 @@
 [package]
 name = "sleet"
-version = "0.1.0"
+version = "0.1.1"
 description = "A focused, lightweight browser"
 authors = ["Sleet contributors"]
 license = "MIT"
@@ -30,6 +30,9 @@ arboard = { version = "3", default-features = false }
 csv = "1"
 # Signed in-app updates (switched on only when an update key is configured).
 tauri-plugin-updater = "3.0.0-alpha.3"
+# One Sleet at a time: a second launch (a link clicked in another app) hands
+# its links to the running Sleet and exits.
+tauri-plugin-single-instance = "3.0.0-alpha.3"
 ureq = "3"
 # Native Save as dialog for "Ask where to save each file".
 rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
