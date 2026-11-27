@@ -264,6 +264,7 @@ kbd { padding: 1px 5px; border: 1px solid var(--line-strong); border-radius: 5px
 .dock-drop.is-top { inset: 30px 0 calc((100% - 30px) / 2) 0; }
 .dock-drop.is-bottom { inset: calc(30px + (100% - 30px) / 2) 0 0 0; }
 .tab-docked { margin-right: 5px; color: var(--accent-ink); vertical-align: -1px; }
+.tab-kept-active { margin-right: 5px; color: var(--accent-ink); vertical-align: -1px; }
 .page-waking { position: absolute; inset: 0; display: grid; place-items: center; color: var(--faint); font-size: calc(14px * var(--text-scale)); }
 
 .browser-preview { position: absolute; inset: 0; display: grid; overflow: auto; grid-template-columns: minmax(0, 925px) 30px; justify-content: center; gap: 88px; padding: clamp(68px, 8vh, 120px) clamp(43px, 7vw, 125px); background: radial-gradient(circle at 72% 10%, var(--accent-soft), transparent 27%), var(--paper); }

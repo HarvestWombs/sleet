@@ -1,6 +1,7 @@
 {
   "version": "0.0.1",
   "configurations": [
-    { "name": "sleet-web", "runtimeExecutable": "npm", "runtimeArgs": ["run", "dev"], "port": 1420 }
+    { "name": "sleet-web", "runtimeExecutable": "npm", "runtimeArgs": ["run", "dev"], "port": 1420 },
+    { "name": "sleet-shots", "runtimeExecutable": "npx", "runtimeArgs": ["vite", "--port", "1425", "--strictPort"], "port": 1425 }
   ]
 }

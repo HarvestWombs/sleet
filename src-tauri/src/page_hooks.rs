@@ -50,7 +50,7 @@ mod imp {
             COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED,
             ICoreWebView2, ICoreWebView2ContextMenuItem, ICoreWebView2ContextMenuItemCollection,
             ICoreWebView2Environment9, ICoreWebView2_11, ICoreWebView2_15, ICoreWebView2_8, ICoreWebView2_9,
-            ICoreWebView2Settings4, ICoreWebView2_19,
+            ICoreWebView2Settings4, ICoreWebView2_19, ICoreWebView2_13, ICoreWebView2Profile6,
             COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
             COREWEBVIEW2_FAVICON_IMAGE_FORMAT_PNG,
             COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND, COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND,
@@ -312,8 +312,17 @@ mod imp {
 
                 // Passwords: Sleet's vault replaces WebView2's own password saving,
                 // and login messages from the page script go to password_bridge.
+                // Off for the whole profile too: a per-page setting only applies
+                // from that page's next navigation, so a login on a tab's first page
+                // still got WebView2's prompt. General autofill is off as well, since
+                // its suggestion list (usernames typed before) opened on top of Sleet's.
+                if let Ok(profile) = core.cast::<ICoreWebView2_13>().and_then(|core| unsafe { core.Profile() }).and_then(|profile| profile.cast::<ICoreWebView2Profile6>()) {
+                    let _ = unsafe { profile.SetIsPasswordAutosaveEnabled(false) };
+                    let _ = unsafe { profile.SetIsGeneralAutofillEnabled(false) };
+                }
                 if let Ok(settings) = unsafe { core.Settings() }.and_then(|settings| settings.cast::<ICoreWebView2Settings4>()) {
                     let _ = unsafe { settings.SetIsPasswordAutosaveEnabled(false) };
+                    let _ = unsafe { settings.SetIsGeneralAutofillEnabled(false) };
                 }
                 let bridge_app = app.clone();
                 let bridge_label = label.clone();

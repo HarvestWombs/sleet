@@ -21,6 +21,8 @@ export interface BrowserTab {
   bookmarkId?: string;
   /** Private tab: InPrivate profile, no history, never saved to disk. */
   private?: boolean;
+  /** Never unload this tab automatically while Sleet is running. */
+  keepActive?: boolean;
   /** Certificate problem on the current site (cleared when the site changes). */
   certError?: { host: string; problem: string };
 }

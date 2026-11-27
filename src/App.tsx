@@ -1647,6 +1647,7 @@ export default function App() {
         && !busy.has(viewLabel(tab.id))
         && !audioRef.current[tab.id]?.playing
         && !tab.private
+        && !tab.keepActive
         && now - (lastActiveAt.current.get(tab.id) ?? now) > limit);
       if (toSleep.length === 0) return;
       toSleep.forEach((tab) => {
@@ -2078,6 +2079,7 @@ export default function App() {
         ...otherWindows.map((other) => ({ label: windowName(other), onSelect: () => void moveTabsToOtherWindow([tab.id], other.label) })),
       ] },
       "separator",
+      { label: tab.keepActive ? "Allow tab to sleep" : "Keep tab active", key: "h", onSelect: () => setTabs((items) => items.map((item) => item.id === tab.id ? { ...item, keepActive: item.keepActive ? undefined : true } : item)) },
       { label: "Unload tab", key: "u", onSelect: () => unloadTab(tab.id), disabled: tab.id === activeId || !createdViews.current.has(tab.id) },
       { label: "Close", key: "w", onSelect: () => void closeTab(tab.id) },
       { label: "Close more", key: "o", disabled: tabs.length < 2, submenu: [

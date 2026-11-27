@@ -1,4 +1,4 @@
-import { ChevronRight, Columns2, Download, FolderOpen, History, List, Moon, Plus, Settings2, VenetianMask, Volume2, VolumeX, X, Frown, PanelLeftClose } from "lucide-react";
+import { Anchor, ChevronRight, Columns2, Download, FolderOpen, History, List, Moon, Plus, Settings2, VenetianMask, Volume2, VolumeX, X, Frown, PanelLeftClose } from "lucide-react";
 import { type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, useRef, useState } from "react";
 import { BookmarkEditor } from "./BookmarkGrid";
 import { displayHost, isHomeUrl } from "../lib/browser";
@@ -376,7 +376,7 @@ export function TabSidebar(props: TabSidebarProps) {
                 </span>
                 <button className="tab-main" onClick={() => { if (!suppressClick.current) onActivate(tab.id); }} title={asleep ? `${tab.title} (inactive, reloads when opened)` : tab.title}>
                   <span className="tab-copy">
-                    <strong>{dockedIds?.has(tab.id) && <Columns2 size={12} className="tab-docked" aria-label="Docked" />}{tab.title || "Untitled"}</strong>
+                    <strong>{dockedIds?.has(tab.id) && <Columns2 size={12} className="tab-docked" aria-label="Docked" />}{tab.keepActive && <Anchor size={12} className="tab-kept-active" aria-label="Kept active" />}{tab.title || "Untitled"}</strong>
                     {detailed && <small>{isHomeUrl(tab.url) ? "Sleet" : displayHost(tab.url)}</small>}
                   </span>
                 </button>
