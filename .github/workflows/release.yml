@@ -2,7 +2,8 @@
 # draft GitHub release. Publish the draft to ship it: installed copies of Sleet
 # check the latest published release for updates.
 #
-# Start a release: bump "version" in src-tauri/tauri.conf.json, commit, then
+# Start a release: bump "version" in src-tauri/tauri.conf.json, add its
+# section to CHANGELOG.md (that's the release notes), commit, then
 #   git tag v0.2.0 && git push origin v0.2.0
 # (or run this workflow by hand from the Actions tab).
 #
@@ -66,6 +67,21 @@ jobs:
             exit 1
           fi
 
+      # The release notes are this version's section of CHANGELOG.md (the
+      # build stops here if it has none).
+      - name: Release notes from CHANGELOG.md
+        id: notes
+        shell: bash
+        run: |
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          {
+            echo "body<<SLEET_NOTES_END"
+            node scripts/release-notes.mjs "$version"
+            echo
+            echo "Download the installer for your system below. Sleet already installed? It offers the update in Settings → Advanced."
+            echo "SLEET_NOTES_END"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Linux build dependencies
         if: runner.os == 'Linux'
         run: |
@@ -105,7 +121,7 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: Sleet v__VERSION__
-          releaseBody: Download the installer for your system below. Sleet already installed? It offers the update in Settings → Advanced.
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}

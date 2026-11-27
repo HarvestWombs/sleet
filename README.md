@@ -145,7 +145,7 @@ GitHub Actions builds everything.
 - **CI** (`ci.yml`): every push and pull request runs the type check, frontend tests and Rust tests on Windows and Linux.
 - **Release** (`release.yml`): pushing a `v*` tag builds Windows and Linux installers and attaches them to a **draft** release. Publishing the draft ships it, and installed copies offer the update in Settings → Advanced.
 
-To release, bump `version` in `src-tauri/tauri.conf.json` (the tag must match it), commit, then:
+To release, bump `version` in `src-tauri/tauri.conf.json` (the tag must match it) and add the version's section to [`CHANGELOG.md`](CHANGELOG.md), which becomes the release notes. Commit, then:
 
 ```bash
 git tag v0.2.0
