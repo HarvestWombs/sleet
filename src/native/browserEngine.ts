@@ -51,6 +51,18 @@ export async function navigateView(tabId: string, url: string) {
   await invoke("navigate_browser_view", { label: viewLabel(tabId), url });
 }
 
+/** Hands the keyboard shortcut table (key → action) to pages, so shortcuts work there too. */
+export async function setPageShortcuts(table: Record<string, string>) {
+  if (!isTauri()) return;
+  await invoke("set_shortcuts", { table }).catch(() => undefined);
+}
+
+/** A site's icon (data URL) fetched from the site itself, for bookmarks of sites that aren't open. */
+export async function siteIcon(url: string): Promise<string | null> {
+  if (!isTauri()) return null;
+  return invoke<string | null>("site_icon", { url }).catch(() => null);
+}
+
 /** Tabs docked beside the active one: shown along with it (lib/dock.ts). */
 let dockedVisible: string[] = [];
 export function setDockedVisible(tabIds: string[]) { dockedVisible = tabIds; }

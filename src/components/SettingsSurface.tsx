@@ -8,8 +8,10 @@ import { allLinks, type Bookmark } from "../lib/bookmarks";
 import { type BookmarkSource, detectBookmarkSources, readBookmarkSource } from "../native/bookmarkImport";
 import { BookmarkImportPage, type PendingImport } from "./BookmarkImportPage";
 import { PasswordList, PasswordsPanel } from "./Passwords";
+import { ShortcutKeys } from "./ShortcutKeys";
+import { resolveShortcuts, SHORTCUT_ACTIONS } from "../lib/shortcuts";
 import { checkForUpdate, installUpdate, type UpdateInfo } from "../native/browserEngine";
-import { APP_ZOOM_LEVELS, SEARCH_ENGINES, type Settings, ZOOM_LEVELS } from "../lib/settings";
+import { APP_ZOOM_LEVELS, GROUP_TINTS, SEARCH_ENGINES, type Settings, ZOOM_LEVELS } from "../lib/settings";
 
 export interface ClearDataOptions {
   history: boolean;
@@ -89,6 +91,9 @@ interface SettingsSurfaceProps {
   onReset: () => void;
   bookmarks: Bookmark[];
   onImportBookmarks: (tree: Bookmark[], icons: Record<string, string>) => void;
+  /** Sites pinned in the sidebar (separate from bookmarks). */
+  pinnedCount: number;
+  onRemoveAllPinned: () => void;
   onRemoveAllBookmarks: () => void;
   /** Whether Sleet is the system's default browser (null while unknown). */
   defaultBrowser: { supported: boolean; isDefault: boolean } | null;
@@ -114,6 +119,7 @@ const SECTIONS = [
   { id: "security", title: "Security", description: "Secure connections, popups and what sites may access." },
   { id: "bookmarks", title: "Bookmarks", description: "Bring bookmarks over from another browser or a file." },
   { id: "passwords", title: "Passwords", description: "Saved passwords, encrypted on this device with a master password." },
+  { id: "shortcuts", title: "Keyboard shortcuts", description: "The keys for each action. Alt with a letter is quick to reach and easy to remember; the usual browser keys work too." },
   { id: "advanced", title: "Advanced", description: "Developer options and resetting Sleet." },
 ];
 
@@ -219,7 +225,7 @@ function ConfirmButton({ children, onConfirm, danger = true }: { children: React
   );
 }
 
-export function SettingsSurface({ settings, section, downloadDirError, onChange, onResetSidebar, onClearData, onOpenDevtools, onReset, defaultBrowser, onMakeDefault, bookmarks, onImportBookmarks, onRemoveAllBookmarks, clearRequest = 0 }: SettingsSurfaceProps) {
+export function SettingsSurface({ settings, section, downloadDirError, onChange, onResetSidebar, onClearData, onOpenDevtools, onReset, defaultBrowser, onMakeDefault, bookmarks, onImportBookmarks, onRemoveAllBookmarks, pinnedCount, onRemoveAllPinned, clearRequest = 0 }: SettingsSurfaceProps) {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState(section ?? "appearance");
   const [sources, setSources] = useState<BookmarkSource[] | null>(null);
@@ -295,6 +301,31 @@ export function SettingsSurface({ settings, section, downloadDirError, onChange,
       control: (
         <select className="settings-select" aria-label="Text size" value={settings.textSize} onChange={(event) => onChange({ textSize: Number(event.target.value) })}>
           {TEXT_SIZES.map((size) => <option key={size} value={size}>{Math.round(size * 100)}%</option>)}
+        </select>
+      ),
+    },
+    {
+      section: "appearance", label: "Bookmark size on Home", detail: "How big the bookmark tiles are on the Home page", keywords: "bookmarks tiles home size icons grid",
+      control: (
+        <select className="settings-select" aria-label="Bookmark size on Home" value={settings.homeTileSize} onChange={(event) => onChange({ homeTileSize: Number(event.target.value) })}>
+          {[[48, "Small"], [64, "Medium"], [80, "Large"], [96, "Extra large"]].map(([size, label]) => <option key={size} value={size}>{label} ({size}px)</option>)}
+        </select>
+      ),
+    },
+    {
+      section: "appearance", label: "Bookmark group background", detail: "How much each group of bookmarks on the Home page is tinted (pick a group's color from its menu)", keywords: "bookmarks groups background tint color home",
+      control: (
+        <select className="settings-select" aria-label="Bookmark group background" value={settings.homeGroupTint} onChange={(event) => onChange({ homeGroupTint: event.target.value as Settings["homeGroupTint"] })}>
+          {GROUP_TINTS.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+        </select>
+      ),
+    },
+    { section: "appearance", label: "Names under bookmarks", detail: "Show each site's name under its tile on the Home page", keywords: "bookmarks labels names home", control: <Toggle label="Names under bookmarks" checked={settings.homeShowLabels} onChange={set("homeShowLabels")} /> },
+    {
+      section: "appearance", label: "Pinned site size", detail: "How big the pinned sites are at the top of the sidebar", keywords: "pinned favorites sidebar size icons grid",
+      control: (
+        <select className="settings-select" aria-label="Pinned site size" value={settings.pinnedSize} onChange={(event) => onChange({ pinnedSize: Number(event.target.value) })}>
+          {[[40, "Small"], [50, "Medium"], [60, "Large"], [72, "Extra large"]].map(([size, label]) => <option key={size} value={size}>{label} ({size}px)</option>)}
         </select>
       ),
     },
@@ -399,7 +430,8 @@ export function SettingsSurface({ settings, section, downloadDirError, onChange,
         </label>
       ),
     },
-    { section: "bookmarks", label: "Bookmarks in Sleet", detail: `${allLinks(bookmarks).length} bookmarks in ${bookmarks.filter((node) => node.kind === "folder").length} folders`, keywords: "remove delete all bookmarks", control: <ConfirmButton onConfirm={onRemoveAllBookmarks}>Remove all</ConfirmButton> },
+    { section: "bookmarks", label: "Bookmarks in Sleet", detail: `${allLinks(bookmarks).length} bookmarks in ${bookmarks.filter((node) => node.kind === "folder").length} groups on the Home page`, keywords: "remove delete all bookmarks", control: <ConfirmButton onConfirm={onRemoveAllBookmarks}>Remove all</ConfirmButton> },
+    { section: "bookmarks", label: "Pinned sites", detail: `${pinnedCount} pinned at the top of the sidebar (the star in the address bar)`, keywords: "remove delete all pinned favorites sidebar", control: <ConfirmButton onConfirm={onRemoveAllPinned}>Remove all</ConfirmButton> },
     { section: "security", label: "Passwords", detail: "Saved passwords, master password, import and export", keywords: "password vault login master autofill", control: <button className="settings-button" onClick={() => { setQuery(""); setCategory("passwords"); }}>Open</button> },
     { section: "security", label: "Harmful downloads", detail: "Windows checks installers and other risky files; Sleet asks before keeping one it flags", keywords: "smartscreen exe download virus", control: <span className="settings-value">Always on</span> },
     {
@@ -426,6 +458,19 @@ export function SettingsSurface({ settings, section, downloadDirError, onChange,
     { section: "privacy", label: "Clear history when Sleet closes", keywords: "exit quit", control: <Toggle label="Clear history when Sleet closes" checked={settings.clearHistoryOnExit} onChange={set("clearHistoryOnExit")} /> },
     { section: "privacy", label: "Clear cookies and site data when Sleet closes", detail: "Signs you out of sites each time", keywords: "exit quit cookies", control: <Toggle label="Clear cookies and site data when Sleet closes" checked={settings.clearSiteDataOnExit} onChange={set("clearSiteDataOnExit")} /> },
 
+    {
+      section: "shortcuts", label: "All shortcuts", detail: Object.keys(settings.shortcuts ?? {}).length ? `${Object.keys(settings.shortcuts).length} changed from the defaults` : "All on their default keys",
+      keywords: "keyboard shortcuts keys reset defaults",
+      control: <ConfirmButton onConfirm={() => onChange({ shortcuts: {} })}>Reset all</ConfirmButton>,
+    },
+    ...SHORTCUT_ACTIONS.map((action) => ({
+      section: "shortcuts",
+      label: action.label,
+      detail: action.group,
+      keywords: `keyboard shortcut key ${action.group} ${resolveShortcuts(settings.shortcuts)[action.id].join(" ")}`,
+      control: <ShortcutKeys action={action} overrides={settings.shortcuts ?? {}} onChange={(shortcuts) => onChange({ shortcuts })} />,
+    })),
+    { section: "shortcuts", label: "Fixed keys", detail: "Alt+1–9 and Alt with a longer number pick a tab by number, Ctrl+1–9 open your pinned sites in order (Ctrl+9 the last), Esc stops a page loading, Ctrl+scroll zooms.", keywords: "keyboard digits number tab pinned escape zoom", control: <span /> },
     { section: "advanced", label: "Updates", detail: "Sleet checks a signed release feed; nothing installs without your click.", keywords: "update version upgrade release about", control: <UpdateControl /> },
     { section: "advanced", label: "Custom user agent", detail: "Applies to tabs opened after the change. Leave empty for the default.", keywords: "ua", control: <CommitInput label="Custom user agent" value={settings.userAgent} onCommit={set("userAgent")} placeholder="Default" /> },
     { section: "advanced", label: "Developer tools", detail: "Inspect the current page", keywords: "devtools inspect debug", control: <button className="settings-button" onClick={onOpenDevtools}>Open</button> },

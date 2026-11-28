@@ -1,7 +1,8 @@
 import type { HistoryEntry } from "../types";
 
 export interface Suggestion {
-  kind: "domain" | "history" | "search" | "url" | "command";
+  /** `bookmark`: from the Alt+D bookmark list. */
+  kind: "domain" | "history" | "search" | "url" | "command" | "bookmark";
   title: string;
   subtitle?: string;
   /** Address to open, or the raw query for `search`. */

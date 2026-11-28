@@ -28,6 +28,19 @@ export interface Settings {
   downloadAsk: boolean;
   /** File extensions (lowercase, no dot) opened automatically when their download finishes. */
   autoOpenTypes: string[];
+  /** Keyboard shortcuts changed from their defaults: action id → keys (lib/shortcuts.ts). */
+  shortcuts: Record<string, string[]>;
+  /** Bookmark tile size on the Home page, in pixels. */
+  homeTileSize: number;
+  /** Pinned site tile size in the sidebar, in pixels. */
+  pinnedSize: number;
+  /** Home page: how much bookmark groups' backgrounds are tinted. */
+  homeGroupTint: "none" | "subtle" | "strong";
+  /** Home page: what shows (Customize on the Home page). */
+  homeShowLabels: boolean;
+  homeShowBookmarks: boolean;
+  homeShowGreeting: boolean;
+  homeShowHints: boolean;
   /** File types (lowercase, no dot) kept without asking when Windows warns they can be harmful. */
   trustedDownloadTypes: string[];
   inactiveMinutes: number;
@@ -79,6 +92,14 @@ export const DEFAULT_SETTINGS: Settings = {
   downloadAsk: false,
   autoOpenTypes: [],
   trustedDownloadTypes: [],
+  shortcuts: {},
+  homeTileSize: 64,
+  pinnedSize: 50,
+  homeGroupTint: "subtle",
+  homeShowLabels: true,
+  homeShowBookmarks: true,
+  homeShowGreeting: true,
+  homeShowHints: true,
   inactiveMinutes: 5,
   trackingPrevention: "balanced",
   httpsOnly: false,
@@ -105,6 +126,8 @@ export const SEARCH_ENGINES: Record<SearchEngineId, { name: string; url: string 
   brave: { name: "Brave Search", url: "https://search.brave.com/search?q=" },
   startpage: { name: "Startpage", url: "https://www.startpage.com/do/search?q=" },
 };
+
+export const GROUP_TINTS: [Settings["homeGroupTint"], string][] = [["none", "None"], ["subtle", "Subtle"], ["strong", "Strong"]];
 
 export const ZOOM_LEVELS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3];
 export const APP_ZOOM_LEVELS = [0.8, 0.9, 1, 1.1, 1.25, 1.5];

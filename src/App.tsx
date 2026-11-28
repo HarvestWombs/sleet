@@ -43,6 +43,8 @@ import {
   stepHistory,
   resizeView,
   setDockedVisible,
+  siteIcon,
+  setPageShortcuts,
   setChromeZoom,
   setDownloadDir,
   setViewMuted,
@@ -73,9 +75,13 @@ import { dockTab, type DockNode, type DockSide, pruneLayouts, setRatio, sideAt, 
 import { DockView } from "./components/DockView";
 import { groupAfterMove, keepGroupsTogether, liveGroups, nextGroupColor, nextGroupName, setGroup, type TabGroup } from "./lib/tabGroups";
 import { canAutoOpen, extensionOf, normalizeExtension, shouldAutoOpen } from "./lib/downloadTypes";
+import { bindingFromEvent, bindingTable, resolveShortcuts, setActiveShortcuts, SHORTCUT_ACTIONS, shortcutLabel } from "./lib/shortcuts";
 import { forgetSession, IS_MAIN_WINDOW, listWindows, moveTabsToWindow, openWindow, sessionKey, startedWithPages, WINDOW_LABEL, windowAt, type WindowInfo, type WindowStart, windowsToReopen } from "./lib/windows";
 import { buildSuggestions, type Suggestion } from "./lib/suggest";
 import { faviconFor, hasSharpFavicon, onFaviconsChanged, rememberFavicon, rememberFavicons, shrinkIcon } from "./lib/favicons";
+import { addHomeBookmark, addHomeGroup, realGroups, takeOutOfGroup, dropTile, findHomeBookmark, groupsToTree, type HomeBookmark, type HomeGroup, makeHomeId, moveGroupTo, moveHomeBookmark, recolorHomeGroup, removeHomeBookmark, removeHomeGroup, renameHomeGroup, resizeGroup, treeToGroups, updateHomeBookmark } from "./lib/homeBookmarks";
+import { HomeBookmarks } from "./components/HomeBookmarks";
+import { addExampleBookmarks } from "./lib/homeExamples";
 import { allLinks, type Bookmark, findBookmark, findByUrl, insertBookmark, makeBookmarkId, groupBookmarks, moveBookmark, removeBookmark, ungroupFolder, updateBookmark } from "./lib/bookmarks";
 import { BookmarkEditor, BookmarkGrid, type BookmarkState } from "./components/BookmarkGrid";
 import { type LoginItem, LoginsMenu } from "./components/LoginsMenu";
@@ -88,14 +94,6 @@ const initialTab: BrowserTab = { id: IS_MAIN_WINDOW ? "home" : `home${crypto.ran
 
 const DEFAULT_SIDEBAR_WIDTH = 275;
 const RECENT_HISTORY = 200;
-const SHORTCUTS: Record<string, string> = {
-  k: "palette", l: "address", t: "new-tab", n: "new-window", w: "close-tab", y: "history", j: "downloads", ",": "settings",
-  "=": "zoom-in", "+": "zoom-in", "-": "zoom-out", "0": "zoom-reset", d: "bookmark",
-  f: "find", g: "find-next", p: "print", r: "reload", tab: "next-tab", pagedown: "next-tab", pageup: "previous-tab",
-};
-const SHIFTED_SHORTCUTS: Record<string, string> = {
-  n: "new-private-tab", w: "reopen-tab", t: "reopen-tab", s: "toggle-sidebar", tab: "previous-tab", g: "find-previous", delete: "clear-data", r: "reload",
-};
 const NO_MATCHES: FindResult = { count: 0, index: -1 };
 /** Toolbar height in CSS pixels (the --toolbar variable). */
 const toolbarHeight = () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--toolbar")) || 58;
@@ -123,6 +121,15 @@ export default function App() {
   const [bookmarks, setBookmarks] = usePersistentState<Bookmark[]>("sleet.bookmarks", []);
   const [expandedFolders, setExpandedFolders] = usePersistentState<string[]>("sleet.bookmark-folders", []);
   const [bookmarksCollapsed, setBookmarksCollapsed] = usePersistentState("sleet.bookmarks-collapsed", false);
+  /** Bookmarks on the Home page, in groups (`sleet.bookmarks` above is the sidebar's pinned sites). */
+  const [homeGroups, setHomeGroups] = usePersistentState<HomeGroup[]>("sleet.home-bookmarks", []);
+  /** Columns the Home board fits right now (places groups made from the New group button). */
+  const homeColumnsRef = useRef(12);
+  const setHomeColumnsRef = useCallback((columns: number) => { homeColumnsRef.current = columns; }, []);
+  const [editingHome, setEditingHome] = useState<string | null>(null);
+  const [renamingHomeGroup, setRenamingHomeGroup] = useState<string | null>(null);
+  /** Alt+D: the address bar's dropdown lists bookmarks. */
+  const [bookmarkMode, setBookmarkMode] = useState(false);
   const [editingBookmark, setEditingBookmark] = useState<Bookmark | null>(null);
   const vault = useVaultStatus();
   /** Saved logins for the active page (only while unlocked). */
@@ -133,6 +140,12 @@ export default function App() {
   const [savedSidebarWidth, setSidebarWidth] = usePersistentState("sleet.sidebar-width", DEFAULT_SIDEBAR_WIDTH);
   const [storedSettings, setStoredSettings] = usePersistentState<Settings>(SETTINGS_KEY, DEFAULT_SETTINGS);
   const settings = useMemo(() => ({ ...DEFAULT_SETTINGS, ...storedSettings }), [storedSettings]);
+  /** Each action's keys (defaults plus the user's changes), and key → action for key presses. */
+  const resolvedShortcuts = useMemo(() => resolveShortcuts(settings.shortcuts), [settings.shortcuts]);
+  const shortcutTable = useMemo(() => bindingTable(resolvedShortcuts), [resolvedShortcuts]);
+  setActiveShortcuts(resolvedShortcuts);
+  const shortcutTableRef = useRef(shortcutTable);
+  shortcutTableRef.current = shortcutTable;
   const sidebarWidth = clampSidebarWidth(savedSidebarWidth);
   /** Sidebar hidden (Ctrl+Shift+S); the toolbar then shows a button to bring it back. */
   const [sidebarHidden, setSidebarHidden] = usePersistentState("sleet.sidebar-hidden", false);
@@ -953,7 +966,9 @@ export default function App() {
     if (command === "close-tab" && activeTab) void closeTab(activeTab.id);
     if (command === "new-private-tab") void newTab(undefined, { private: true, focusAddress: true });
     if (command === "reopen-tab") void reopenClosedTab();
-    if (command === "bookmark") toggleBookmarkRef.current();
+    if (command === "bookmark") toggleHomeBookmarkRef.current();
+    if (command === "pin") toggleBookmarkRef.current();
+    if (command === "bookmark-list") void openBookmarkListRef.current();
     if (command === "history") toggleSurface("history");
     if (command === "downloads") toggleSurface("downloads");
     if (command === "settings") { if (surface === "settings") setSurface("browser"); else openSettings(); }
@@ -973,7 +988,9 @@ export default function App() {
     if (command.kind === "settings") openSettings(command.section);
     if (command.kind === "new-private-tab") void newTab(undefined, { private: true, focusAddress: true });
     if (command.kind === "reopen-tab") void reopenClosedTab();
-    if (command.kind === "bookmark") toggleBookmarkRef.current();
+    if (command.kind === "bookmark") toggleHomeBookmarkRef.current();
+    if (command.kind === "pin") toggleBookmarkRef.current();
+    if (command.kind === "bookmark-list") void openBookmarkListRef.current();
     if (command.kind === "find") void openFind();
     if (command.kind === "print") void printActive();
     if (command.kind === "save-pdf") void savePdfActive();
@@ -1570,6 +1587,16 @@ export default function App() {
     if (suggestVisible) void overlayPlace(overlayLabel("suggest"), overlayBounds("suggest"));
   }, [suggestions, selectedSuggestion, suggestAnchor, overlayTheme, overlayVarsKey, overlaySizes.suggest?.height, settings.appZoom, sidebarShown]);
 
+  // The Home page scrolls (a big bookmark board makes it long): keep the suggestions under its search box.
+  useEffect(() => {
+    if (!isTauri() || !suggestVisible || suggestAnchor !== "home") return;
+    const page = document.querySelector<HTMLElement>(".home-surface");
+    if (!page) return;
+    const follow = () => void overlayPlace(overlayLabel("suggest"), overlayBounds("suggest"));
+    page.addEventListener("scroll", follow, { passive: true });
+    return () => page.removeEventListener("scroll", follow);
+  }, [suggestVisible, suggestAnchor]);
+
   // Overlay messages: ready (resend state), size, and user actions.
   const overlayActionRef = useRef<(action: OverlayAction) => void>(() => undefined);
   const pickSuggestionRef = useRef<(item: Suggestion) => void>(() => undefined);
@@ -1680,28 +1707,27 @@ export default function App() {
 
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.altKey && !event.ctrlKey && !event.metaKey) {
-        if (/^[0-9]$/.test(event.key)) { event.preventDefault(); runShortcut(`tab-digit-${event.key}`); return; }
-        const inField = (event.target as HTMLElement | null)?.closest("input, textarea, [contenteditable]");
-        if (!inField && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
-          event.preventDefault();
-          runShortcut(event.key === "ArrowLeft" ? "back" : "forward");
-          return;
-        }
+      // The shortcut editor is recording a key: leave it alone.
+      if (document.body.dataset.recordingShortcut) return;
+      const inField = !!(event.target as HTMLElement | null)?.closest("input, textarea, [contenteditable]");
+      // Alt+digits pick a tab by number (Alt released commits), Ctrl+1–9 open a pinned site; not editable.
+      if (event.altKey && !event.ctrlKey && !event.metaKey && /^Digit[0-9]$/.test(event.code)) {
+        event.preventDefault();
+        runShortcut(`tab-digit-${event.code.slice(5)}`);
+        return;
       }
-      const plain = !event.ctrlKey && !event.metaKey && !event.altKey;
-      if (plain) {
-        const fkey = ({ F5: "reload", F11: "fullscreen", F3: event.shiftKey ? "find-previous" : "find-next" } as Record<string, string>)[event.key];
-        if (fkey) { event.preventDefault(); runShortcut(fkey); return; }
-        const inField = (event.target as HTMLElement | null)?.closest("input, textarea, [contenteditable]");
-        if (event.key === "Escape" && !inField && loadingRef.current.has(activeIdRef.current)) { runShortcut("stop"); return; }
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && /^Digit[1-9]$/.test(event.code)) {
+        event.preventDefault();
+        event.stopPropagation();
+        runShortcut(`pinned-index-${event.code.slice(5)}`);
+        return;
       }
-      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
-      const key = event.key.toLowerCase();
-      const command = !event.shiftKey && /^[1-9]$/.test(event.key)
-        ? `tab-index-${event.key}`
-        : event.shiftKey && SHIFTED_SHORTCUTS[key] ? SHIFTED_SHORTCUTS[key] : SHORTCUTS[key];
+      if (event.key === "Escape" && !inField && !event.ctrlKey && !event.altKey && loadingRef.current.has(activeIdRef.current)) { runShortcut("stop"); return; }
+      const binding = bindingFromEvent(event);
+      const command = binding ? shortcutTableRef.current[binding] : undefined;
       if (!command) return;
+      // In a text field, Alt+Left/Right keep moving through the text.
+      if (inField && (binding === "Alt+Left" || binding === "Alt+Right")) return;
       event.preventDefault();
       event.stopPropagation();
       runShortcut(command);
@@ -1785,6 +1811,13 @@ export default function App() {
     }).then((unlisten) => { stop = unlisten; });
     return () => stop?.();
   }, []);
+
+  // Pinned site size (Settings → Appearance).
+  useEffect(() => { document.documentElement.style.setProperty("--pinned-tile", `${settings.pinnedSize}px`); }, [settings.pinnedSize]);
+
+  // Keyboard shortcuts (Settings → Keyboard shortcuts): pages get the same table.
+  const shortcutsKey = JSON.stringify(settings.shortcuts ?? {});
+  useEffect(() => { void setPageShortcuts(shortcutTable); }, [shortcutsKey]);
 
   // The engine's own menu (Back, Reload, Inspect…) never shows on Sleet's interface;
   // text fields keep it for cut, copy and paste.
@@ -1903,7 +1936,7 @@ export default function App() {
     if (existing) {
       setBookmarks((tree) => removeBookmark(tree, existing.id));
       setTabs((items) => items.map((item) => item.bookmarkId === existing.id ? { ...item, bookmarkId: undefined } : item));
-      showMessage(`Removed “${existing.title}” from bookmarks`);
+      showMessage(`Unpinned “${existing.title}” from the sidebar`);
       return;
     }
     const created: Bookmark = { id: makeBookmarkId(), kind: "link", title: tab.title || pageTitle(tab.url), url: tab.url };
@@ -1921,9 +1954,112 @@ export default function App() {
   const toggleBookmarkRef = useRef(() => undefined as void);
   toggleBookmarkRef.current = () => toggleTabBookmark(tabsRef.current.find((tab) => tab.id === activeIdRef.current));
 
+  // Bookmarks of sites that were never open have no icon yet: fetch each site's
+  // own icon (two at a time, once per site per session) and remember it.
+  const iconRequests = useRef(new Set<string>());
+  useEffect(() => {
+    if (!isTauri()) return;
+    const hostOf = (url: string) => { try { return new URL(url).hostname; } catch { return ""; } };
+    const missing = [...new Map(homeGroups.flatMap((group) => group.items)
+      .filter((item) => !hasSharpFavicon(item.url) && !iconRequests.current.has(hostOf(item.url)))
+      .map((item) => [hostOf(item.url), item.url] as const)).entries()].filter(([host]) => host);
+    if (missing.length === 0) return;
+    missing.forEach(([host]) => iconRequests.current.add(host));
+    // Not cancelled when bookmarks change (a drag): the icons go to the shared icon store either way.
+    const queue = missing.map(([, url]) => url);
+    const worker = async () => {
+      for (let url = queue.shift(); url; url = queue.shift()) {
+        const icon = await siteIcon(url);
+        if (!icon) continue;
+        const small = await shrinkIcon(icon).catch(() => undefined);
+        if (small) rememberFavicon(url, small, true);
+      }
+    };
+    void Promise.all([worker(), worker()]);
+  }, [homeGroups]);
+
+  // ---- Bookmarks (on the Home page, in groups; the sidebar grid is pinned sites)
+  const activeHomeBookmark = activeTab && !isHomeUrl(activeTab.url) && !activeTab.private ? findHomeBookmark(homeGroups, activeTab.url)?.item : undefined;
+
+  /** Adds the tab's page to bookmarks, or removes it (Ctrl+D / the bookmark button). */
+  const toggleHomeBookmark = (tab: BrowserTab | undefined) => {
+    if (!tab || isHomeUrl(tab.url) || tab.private) return;
+    const existing = findHomeBookmark(homeGroups, tab.url);
+    if (existing) {
+      setHomeGroups((groups) => removeHomeBookmark(groups, existing.item.id));
+      showMessage(`Removed “${existing.item.title}” from bookmarks`);
+      return;
+    }
+    const item = { id: makeHomeId(), title: tab.title || pageTitle(tab.url), url: tab.url };
+    setHomeGroups((groups) => addHomeBookmark(groups, item));
+    if (tab.favicon) rememberFavicon(tab.url, tab.favicon);
+    showMessage(`Bookmarked “${item.title}”. It's on the Home page.`);
+  };
+  const toggleHomeBookmarkRef = useRef(() => undefined as void);
+  toggleHomeBookmarkRef.current = () => toggleHomeBookmark(tabsRef.current.find((tab) => tab.id === activeIdRef.current));
+
+  /** A bookmark clicked on the Home page opens in that tab (or a new one with Ctrl or middle click). */
+  const openHomeBookmark = (item: HomeBookmark, inNewTab: boolean) => {
+    if (inNewTab) void newTab(item.url, { nextToActive: true, background: true });
+    else void navigate(item.url);
+  };
+
+  const homeBookmarkMenu = (item: HomeBookmark): MenuEntry[] => {
+    const group = homeGroups.find((entry) => entry.items.some((bookmark) => bookmark.id === item.id));
+    return [
+      { label: "Open", key: "o", onSelect: () => openHomeBookmark(item, false) },
+      { label: "Open in new tab", key: "t", onSelect: () => void newTab(item.url, { nextToActive: true }) },
+      { label: "Open in private tab", key: "p", onSelect: () => void newTab(item.url, { private: true }) },
+      "separator",
+      { label: "Copy link", key: "c", onSelect: () => copyText(item.url) },
+      { label: "Edit…", key: "e", onSelect: () => setEditingHome(item.id) },
+      { label: findByUrl(bookmarks, item.url) ? "Unpin from sidebar" : "Pin to sidebar", key: "s", onSelect: () => {
+        const pinned = findByUrl(bookmarks, item.url);
+        setBookmarks((tree) => pinned ? removeBookmark(tree, pinned.id) : insertBookmark(tree, { id: makeBookmarkId(), kind: "link", title: item.title, url: item.url }));
+      } },
+      { label: "Move to group", key: "g", disabled: realGroups(homeGroups).filter((entry) => entry !== group).length === 0, submenu: realGroups(homeGroups).filter((entry) => entry !== group).map((entry) => ({
+        label: entry.name || "Unnamed group",
+        onSelect: () => setHomeGroups((groups) => moveHomeBookmark(groups, item.id, entry.id)),
+      })) },
+      ...(group && !group.loose ? [{ label: "Take out of group", key: "u", onSelect: () => setHomeGroups((groups) => takeOutOfGroup(groups, item.id)) }] : []),
+      "separator",
+      { label: "Remove bookmark", key: "r", danger: true, onSelect: () => setHomeGroups((groups) => removeHomeBookmark(groups, item.id)) },
+    ];
+  };
+
+  const homeGroupMenu = (group: HomeGroup): MenuEntry[] => [
+    { label: "Open all in new tabs", key: "o", disabled: group.items.length === 0, onSelect: () => group.items.forEach((item) => void newTab(item.url, { background: true })) },
+    { label: "Rename", key: "r", onSelect: () => setRenamingHomeGroup(group.id) },
+    { label: "Group settings…", key: "s", onSelect: () => setEditingHome(group.id) },
+    "separator",
+    { label: "Remove group, keep bookmarks", key: "k", onSelect: () => setHomeGroups((groups) => removeHomeGroup(groups, group.id)) },
+    { label: "Remove group and its bookmarks", key: "d", danger: true, disabled: group.items.length === 0, onSelect: () => setHomeGroups((groups) => removeHomeGroup(groups, group.id, true)) },
+  ];
+
+  /** Alt+D: the address bar lists every bookmark (typing narrows it). */
+  const bookmarkRows = (text: string): Suggestion[] => {
+    const query = text.trim().toLowerCase();
+    return homeGroups.flatMap((group) => group.items
+      .filter((item) => !query || item.title.toLowerCase().includes(query) || item.url.toLowerCase().includes(query) || group.name.toLowerCase().includes(query))
+      .map((item) => ({ kind: "bookmark" as const, title: item.title || item.url, subtitle: group.name ? `${group.name} · ${item.url}` : item.url, url: item.url, icon: faviconFor(item.url) })));
+  };
+  const openBookmarkList = async () => {
+    await focusAddress();
+    setSuggestAnchor("address");
+    setCommandMode(false);
+    setBookmarkMode(true);
+    setSelectedSuggestion(-1);
+    const rows = bookmarkRows("");
+    setSuggestions(rows.length > 0 ? rows : [{ kind: "command", title: "No bookmarks yet", subtitle: "Bookmark a page with Ctrl+D or the bookmark button", url: "", commandId: "bookmark" }]);
+  };
+  const openBookmarkListRef = useRef(openBookmarkList);
+  openBookmarkListRef.current = openBookmarkList;
+
   /** Arc-style: a bookmark jumps to its tab when open, else opens one tied to it. */
   const openBookmark = (bookmark: Bookmark, inNewTab: boolean) => {
     if (!bookmark.url) return;
+    // "New tab every time": each click opens another tab (still linked, so the tile shows it's open).
+    if (bookmark.multiTab && !inNewTab) { void newTab(bookmark.url, { bookmarkId: bookmark.id }); return; }
     const linked = !inNewTab && tabs.find((tab) => tab.bookmarkId === bookmark.id && !tab.private);
     if (linked) { setSidebarMode("tabs"); selectTab(linked.id); return; }
     void newTab(bookmark.url, inNewTab ? { nextToActive: true } : { bookmarkId: bookmark.id });
@@ -1955,8 +2091,9 @@ export default function App() {
       "separator",
       { label: "Copy link", key: "c", onSelect: () => bookmark.url && copyText(bookmark.url) },
       { label: "Edit", key: "e", onSelect: () => setEditingBookmark(bookmark) },
+      { label: "New tab every time", key: "m", checked: !!bookmark.multiTab, onSelect: () => setBookmarks((tree) => updateBookmark(tree, bookmark.id, { multiTab: !bookmark.multiTab || undefined })) },
       "separator",
-      { label: "Remove bookmark", key: "r", danger: true, onSelect: () => setBookmarks((tree) => removeBookmark(tree, bookmark.id)) },
+      { label: "Unpin", key: "r", danger: true, onSelect: () => setBookmarks((tree) => removeBookmark(tree, bookmark.id)) },
     ];
 
   const loadSitePermissions = async (origin: string) => {
@@ -2004,12 +2141,17 @@ export default function App() {
     subtitle: entry.detail,
     url: entry.id,
     commandId: entry.id,
-    shortcut: entry.shortcut,
+    // The key in use now (Settings → Keyboard shortcuts), not the default.
+    shortcut: (() => {
+      const action = entry.id === "private-tab" ? "new-private-tab" : entry.id;
+      return SHORTCUT_ACTIONS.some((item) => item.id === action) ? shortcutLabel(action) : entry.shortcut;
+    })(),
   }));
 
   const onAddressInput = (text: string | null) => {
     setSelectedSuggestion(-1);
-    if (text === null) setCommandMode(false);
+    if (text === null) { setCommandMode(false); setBookmarkMode(false); }
+    if (text !== null && bookmarkMode) { setSuggestions(bookmarkRows(text)); return; }
     if (text !== null && commandMode && !text.trim()) { setSuggestions(commandRows("")); return; }
     setSuggestions(text === null ? [] : buildSuggestions(text, history, SEARCH_ENGINES[settings.searchEngine]?.name ?? "the web")
       .map((item) => item.kind === "domain" || item.kind === "history" ? { ...item, icon: faviconFor(item.url) } : item)
@@ -2056,7 +2198,7 @@ export default function App() {
       { label: "Duplicate", key: "d", onSelect: () => void newTab(tab.url, { nextToActive: tab.id === activeId }), disabled: isHome },
       { label: sound?.muted ? "Unmute tab" : "Mute tab", key: "m", onSelect: () => toggleMute(tab.id), disabled: !createdViews.current.has(tab.id) },
       { label: "Copy link", key: "c", onSelect: () => copyText(tab.url), disabled: isHome },
-      { label: tabBookmark(tab) ? "Remove bookmark" : "Bookmark tab", key: "s", onSelect: () => toggleTabBookmark(tab), disabled: isHome || tab.private },
+      { label: findHomeBookmark(homeGroups, tab.url) ? "Remove from bookmarks" : "Add to bookmarks", key: "b", onSelect: () => toggleHomeBookmark(tab), disabled: isHome || tab.private },
       "separator",
       { label: "Reopen closed tab", key: "z", onSelect: () => void reopenClosedTab(), disabled: closedTabs.current.length === 0 },
       { label: "Group", key: "g", submenu: [
@@ -2103,7 +2245,7 @@ export default function App() {
         { label: anyOpen ? "Collapse all groups" : "Expand all groups", key: "c", onSelect: () => setTabGroups((groups) => groups.map((group) => ({ ...group, collapsed: anyOpen }))) },
       ] : []),
       "separator",
-      { label: bookmarksCollapsed ? "Show bookmarks" : "Fold bookmarks", key: "b", onSelect: () => setBookmarksCollapsed((collapsed) => !collapsed) },
+      { label: bookmarksCollapsed ? "Show pinned sites" : "Fold pinned sites", key: "b", onSelect: () => setBookmarksCollapsed((collapsed) => !collapsed) },
       { label: "Hide sidebar", key: "h", onSelect: () => setSidebarHidden(true) },
     ];
   };
@@ -2225,12 +2367,13 @@ export default function App() {
   };
 
   moreShortcutsRef.current = (command: string) => {
-    const index = /^tab-index-([1-9])$/.exec(command);
-    if (index) {
-      const items = tabsRef.current;
-      const number = Number(index[1]);
-      const tab = number === 9 ? items.at(-1) : items[number - 1];
-      if (tab) { setSidebarMode("tabs"); selectTab(tab.id); }
+    // Ctrl+1–8: the pinned site in that place (folders' sites in order), Ctrl+9 the last one.
+    const pinned = /^pinned-index-([1-9])$/.exec(command);
+    if (pinned) {
+      const links = allLinks(bookmarks);
+      const number = Number(pinned[1]);
+      const link = number === 9 ? links.at(-1) : links[number - 1];
+      if (link) openBookmark(link, false);
       return true;
     }
     if (command === "next-tab" || command === "previous-tab") {
@@ -2248,6 +2391,14 @@ export default function App() {
     if (command === "print") { void printActive(); return true; }
     if (command === "toggle-sidebar") { setSidebarHidden((hidden) => !hidden); return true; }
     if (command === "clear-data") { openSettings("privacy"); setClearRequest((count) => count + 1); return true; }
+    if (command === "group-tab") { groupTabs([activeIdRef.current], null); return true; }
+    if (command === "keep-active") {
+      const id = activeIdRef.current;
+      const kept = tabsRef.current.find((tab) => tab.id === id)?.keepActive;
+      setTabs((items) => items.map((item) => item.id === id ? { ...item, keepActive: item.keepActive ? undefined : true } : item));
+      showMessage(kept ? "This tab can sleep again" : "This tab stays active");
+      return true;
+    }
     return false;
   };
 
@@ -2306,6 +2457,7 @@ export default function App() {
         )}
         bookmarkEditor={editingBookmark && (
           <BookmarkEditor
+            heading={editingBookmark.kind === "folder" ? "Folder" : "Edit pinned site"}
             bookmark={editingBookmark}
             onCancel={() => setEditingBookmark(null)}
             onSave={(patch) => { setBookmarks((tree) => updateBookmark(tree, editingBookmark.id, patch)); setEditingBookmark(null); }}
@@ -2372,6 +2524,8 @@ export default function App() {
           onResetZoom={() => setZoom(0)}
           bookmarked={activeTab && !isHomeUrl(activeTab.url) && !activeTab.private ? !!activeBookmark : undefined}
           onToggleBookmark={() => toggleTabBookmark(activeTab)}
+          inBookmarks={activeTab && !isHomeUrl(activeTab.url) && !activeTab.private ? !!activeHomeBookmark : undefined}
+          onToggleInBookmarks={() => toggleHomeBookmark(activeTab)}
           onNavigate={(value) => void navigate(value)}
           loading={activeLoading}
           canGoBack={canGoBack}
@@ -2385,7 +2539,6 @@ export default function App() {
             else if (action === "stop") { if (activeTab) stopTab(activeTab.id); }
             else if (activeTab) reloadTab(activeTab.id);
           }}
-          onMore={() => void openPalette()}
           suggestions={suggestions}
           selectedSuggestion={selectedSuggestion}
           onAddressInput={(text) => { if (text !== null) setSuggestAnchor("address"); onAddressInput(text); }}
@@ -2438,6 +2591,43 @@ export default function App() {
                 }}
                 onSelectSuggestion={setSelectedSuggestion}
                 onPickSuggestion={pickSuggestion}
+                appearance={settings}
+                onAppearance={updateSettings}
+                onAddGroup={() => {
+                  const result = addHomeGroup(homeGroups, undefined, homeColumnsRef.current);
+                  setHomeGroups(result.groups);
+                  setRenamingHomeGroup(result.id);
+                }}
+                onAddExamples={() => setHomeGroups((groups) => addExampleBookmarks(groups))}
+                bookmarks={!settings.homeShowBookmarks || (activeTab?.private && homeGroups.length === 0) ? undefined : (
+                  <HomeBookmarks
+                    groups={homeGroups}
+                    size={settings.homeTileSize}
+                    tint={settings.homeGroupTint}
+                    showLabels={settings.homeShowLabels}
+                    onOpen={openHomeBookmark}
+                    onDropTile={(id, at, columns) => setHomeGroups((groups) => dropTile(groups, id, at, columns).groups)}
+                    onColumns={setHomeColumnsRef}
+                    onBoardMenu={(x, y, at, columns) => showMenu(x, y, [{ label: "New group here", key: "n", onSelect: () => {
+                      const result = addHomeGroup(homeGroups, at, columns);
+                      setHomeGroups(result.groups);
+                      setRenamingHomeGroup(result.id);
+                    } }])}
+                    onMoveGroup={(id, at, columns) => setHomeGroups((groups) => moveGroupTo(groups, id, at, columns))}
+                    onResizeGroup={(id, cols, rows, columns) => setHomeGroups((groups) => resizeGroup(groups, id, cols, rows, columns))}
+                    onRecolorGroup={(id, color) => setHomeGroups((groups) => recolorHomeGroup(groups, id, color))}
+                    onOpenGroup={(group) => group.items.forEach((item) => void newTab(item.url, { background: true }))}
+                    onRemoveGroup={(id, withBookmarks) => setHomeGroups((groups) => removeHomeGroup(groups, id, withBookmarks))}
+                    onRenameGroup={(id, name) => setHomeGroups((groups) => renameHomeGroup(groups, id, name))}
+                    onEdit={(id, change) => setHomeGroups((groups) => updateHomeBookmark(groups, id, { title: change.title, url: normalizeAddress(change.url, addressOptions()) }))}
+                    onTileMenu={(x, y, item) => showMenu(x, y, homeBookmarkMenu(item))}
+                    onGroupMenu={(x, y, group) => showMenu(x, y, homeGroupMenu(group))}
+                    editing={editingHome}
+                    onEditingChange={setEditingHome}
+                    renaming={renamingHomeGroup}
+                    onRenamingChange={setRenamingHomeGroup}
+                  />
+                )}
               />
             )}
             {!showDockView && surface === "browser" && !activeIsHome && !isTauri() && <BrowserPreview />}
@@ -2478,9 +2668,11 @@ export default function App() {
                 onOpenDevtools={() => activeTab && createdViews.current.has(activeTab.id) && void browserAction(activeTab.id, "devtools")}
                 onReset={() => void resetHorizon()}
                 defaultBrowser={defaultBrowser}
-                bookmarks={bookmarks}
-                onImportBookmarks={(tree, icons) => { setBookmarks(tree); rememberFavicons(icons); setSidebarMode("tabs"); }}
-                onRemoveAllBookmarks={() => { setBookmarks([]); setExpandedFolders([]); }}
+                bookmarks={groupsToTree(homeGroups)}
+                onImportBookmarks={(tree, icons) => { setHomeGroups((groups) => treeToGroups(tree, groups)); rememberFavicons(icons); }}
+                onRemoveAllBookmarks={() => setHomeGroups([])}
+                pinnedCount={allLinks(bookmarks).length}
+                onRemoveAllPinned={() => { setBookmarks([]); setExpandedFolders([]); }}
                 onMakeDefault={() => void makeDefault()}
                 clearRequest={clearRequest}
               />

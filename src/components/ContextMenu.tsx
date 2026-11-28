@@ -1,4 +1,4 @@
-import { ChevronRight } from "lucide-react";
+import { Check, ChevronRight } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 /** A menu item as the code that opens a menu writes it. */
@@ -11,6 +11,8 @@ export type MenuEntry =
       submenu?: MenuEntry[];
       danger?: boolean;
       disabled?: boolean;
+      /** An on/off option: shows a check mark when on. */
+      checked?: boolean;
       /** Single key that picks this item while its menu is open. */
       key?: string;
     }
@@ -27,7 +29,7 @@ export interface MenuRequest {
  * the pages (lib/overlay.ts). `id` names the item when it's picked.
  */
 export type MenuSpecItem =
-  | { id: string; label: string; key?: string; danger?: boolean; disabled?: boolean; submenu?: MenuSpecItem[] }
+  | { id: string; label: string; key?: string; danger?: boolean; disabled?: boolean; checked?: boolean; submenu?: MenuSpecItem[] }
   | "separator";
 export interface MenuSpec { x: number; y: number; items: MenuSpecItem[] }
 
@@ -38,7 +40,7 @@ export function toMenuSpec(menu: MenuRequest): { spec: MenuSpec; actions: Map<st
     if (item === "separator") return "separator";
     const id = `${prefix}${index}`;
     if (item.onSelect) actions.set(id, item.onSelect);
-    return { id, label: item.label, key: item.key, danger: item.danger, disabled: item.disabled, submenu: item.submenu ? convert(item.submenu, `${id}.`) : undefined };
+    return { id, label: item.label, key: item.key, danger: item.danger, disabled: item.disabled, checked: item.checked, submenu: item.submenu ? convert(item.submenu, `${id}.`) : undefined };
   });
   return { spec: { x: menu.x, y: menu.y, items: convert(menu.items, "") }, actions };
 }
@@ -165,7 +167,8 @@ function MenuPanel({ level, items, anchor, openIndex, onHover, onPick }: {
       ) : (
         <button
           key={item.id}
-          role="menuitem"
+          role={item.checked === undefined ? "menuitem" : "menuitemcheckbox"}
+          aria-checked={item.checked}
           aria-haspopup={item.submenu ? "menu" : undefined}
           aria-expanded={item.submenu ? openIndex === index : undefined}
           data-open={item.submenu && openIndex === index ? "true" : undefined}
@@ -179,6 +182,7 @@ function MenuPanel({ level, items, anchor, openIndex, onHover, onPick }: {
           onClick={() => onPick(item, index)}
         >
           <span>{item.label}</span>
+          {item.checked !== undefined && <Check size={15} className={`context-check ${item.checked ? "is-on" : ""}`} aria-hidden="true" />}
           {item.submenu
             ? <ChevronRight size={15} className="context-more" aria-hidden="true" />
             : item.key && <span className="context-key" aria-hidden="true">{item.key.toUpperCase()}</span>}

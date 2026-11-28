@@ -1,4 +1,4 @@
-import { AlertCircle, CheckCircle2, Download, ExternalLink, Globe, KeyRound, LockKeyholeOpen, Pause, Play, ShieldAlert, ShieldQuestion, X } from "lucide-react";
+import { AlertCircle, CheckCircle2, Download, ExternalLink, Globe, List, KeyRound, LockKeyholeOpen, Pause, Play, ShieldAlert, ShieldQuestion, X } from "lucide-react";
 import { useState } from "react";
 import { canPauseDownloads, normalizeExtension } from "../lib/downloadTypes";
 import { hostOf, permissionAsk } from "../lib/permissions";
@@ -40,7 +40,7 @@ interface ToastsProps {
   onCancelDownload: (download: DownloadItem) => void;
   /** Pauses a running download or resumes a paused one. */
   onPauseDownload?: (download: DownloadItem) => void;
-  /** Clicking a download notice opens the Downloads page. */
+  /** The Downloads page (a finished download's button, or clicking one that isn't finished). */
   onShowDownloads?: () => void;
   onResolveCheck: (check: DownloadCheckEvent, keep: boolean, remember?: boolean) => void;
   onPromptChoice: (toast: Toast, choice: PromptChoice) => void;
@@ -290,7 +290,12 @@ export function Toasts({ toasts, downloads, onDismiss, onOpenDownload, onCancelD
         const active = download.status === "active";
         return (
           <div className={`toast is-${download.status} ${download.paused ? "is-paused" : ""}`} key={toast.id}>
-            <button className="toast-body" onClick={() => onShowDownloads?.()} title="Show downloads">
+            {/* A finished download: clicking it opens the file. Otherwise it shows the Downloads page. */}
+            <button
+              className="toast-body"
+              onClick={() => (download.status === "complete" ? onOpenDownload(download) : onShowDownloads?.())}
+              title={download.status === "complete" ? "Open file" : "Show downloads"}
+            >
               {download.status === "complete" ? <CheckCircle2 size={19} className="toast-icon" /> : active ? <Download size={19} className="toast-icon" /> : <AlertCircle size={19} className="toast-icon" />}
               <span className="toast-copy">
                 <strong>{download.filename}</strong>
@@ -305,7 +310,7 @@ export function Toasts({ toasts, downloads, onDismiss, onOpenDownload, onCancelD
                 </button>
               )}
               {download.status === "complete" && (
-                <button className="toast-button" aria-label={`Open ${download.filename}`} title="Open file" onClick={() => onOpenDownload(download)}><ExternalLink size={15} /></button>
+                <button className="toast-button" aria-label="Show downloads" title="Show downloads" onClick={() => onShowDownloads?.()}><List size={15} /></button>
               )}
               {active
                 ? <button className="toast-button" aria-label={`Cancel ${download.filename}`} title="Cancel download" onClick={() => onCancelDownload(download)}><X size={15} /></button>

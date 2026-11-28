@@ -1,4 +1,4 @@
-import { AppWindow, PanelLeft, Download, FileDown, Maximize, Printer, TextSearch, Globe, History, Moon, Plus, RotateCcw, Settings2, Shield, Star, VenetianMask, type LucideIcon } from "lucide-react";
+import { AppWindow, Bookmark, PanelLeft, Download, FileDown, Maximize, Printer, TextSearch, Globe, History, Moon, Plus, RotateCcw, Settings2, Shield, Star, VenetianMask, type LucideIcon } from "lucide-react";
 
 /** Something the address bar can run instead of opening a page. */
 export type PaletteCommand =
@@ -8,6 +8,8 @@ export type PaletteCommand =
   | { kind: "new-private-tab" }
   | { kind: "reopen-tab" }
   | { kind: "bookmark" }
+  | { kind: "pin" }
+  | { kind: "bookmark-list" }
   | { kind: "history" }
   | { kind: "downloads" }
   | { kind: "settings"; section?: string }
@@ -34,7 +36,9 @@ export const COMMANDS: CommandEntry[] = [
   { id: "new-window", icon: AppWindow, title: "Open a new window", detail: "Another Sleet window with its own tabs", shortcut: "Ctrl N", keywords: "new window open", command: { kind: "new-window" } },
   { id: "private-tab", icon: VenetianMask, title: "Open a private tab", detail: "No history; cookies are thrown away when closed", shortcut: "Ctrl Shift N", keywords: "private incognito inprivate tab", command: { kind: "new-private-tab" } },
   { id: "reopen-tab", icon: RotateCcw, title: "Reopen closed tab", detail: "Bring back the tab you closed last", shortcut: "Ctrl Shift W", keywords: "reopen undo closed tab restore", command: { kind: "reopen-tab" } },
-  { id: "bookmark", icon: Star, title: "Bookmark this page", detail: "Pin it to the grid at the top of the sidebar", shortcut: "Ctrl D", keywords: "bookmark favorite pin star save", command: { kind: "bookmark" } },
+  { id: "bookmark", icon: Bookmark, title: "Bookmark this page", detail: "Add it to the bookmarks on the Home page", shortcut: "Ctrl D", keywords: "bookmark favorite save add", command: { kind: "bookmark" } },
+  { id: "pin", icon: Star, title: "Pin this site to the sidebar", detail: "Put it in the pinned sites at the top of the sidebar", shortcut: "Ctrl Shift D", keywords: "pin favorite star sidebar", command: { kind: "pin" } },
+  { id: "bookmark-list", icon: Bookmark, title: "Open a bookmark", detail: "List your bookmarks right here", shortcut: "Alt D", keywords: "bookmarks list open launch", command: { kind: "bookmark-list" } },
   { id: "find", icon: TextSearch, title: "Find in page", detail: "Search the text of this page", shortcut: "Ctrl F", keywords: "find search text page word", command: { kind: "find" } },
   { id: "print", icon: Printer, title: "Print…", detail: "Print this page or save it with the print dialog", shortcut: "Ctrl P", keywords: "print printer paper", command: { kind: "print" } },
   { id: "save-pdf", icon: FileDown, title: "Save page as PDF", detail: "Saves to your Downloads folder", keywords: "pdf save export print document", command: { kind: "save-pdf" } },

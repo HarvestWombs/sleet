@@ -180,6 +180,90 @@ fn find_best(origin: &str, declared: Declared) -> Option<String> {
     ranked.into_iter().take(4).find_map(|(_, href)| fetch_image(&agent, &href))
 }
 
+/// The value of `name="…"` (or single-quoted, or bare) in one HTML tag.
+fn attribute(tag: &str, name: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(found) = lower[from..].find(name) {
+        let at = from + found;
+        from = at + name.len();
+        // A whole attribute name: preceded by whitespace, followed by `=`.
+        if !lower[..at].ends_with(|c: char| c.is_ascii_whitespace()) {
+            continue;
+        }
+        let rest = tag[from..].trim_start();
+        let Some(rest) = rest.strip_prefix('=') else { continue };
+        let rest = rest.trim_start();
+        let value = match rest.chars().next() {
+            Some(quote @ ('"' | '\'')) => rest[1..].split(quote).next().unwrap_or(""),
+            _ => rest.split(|c: char| c.is_ascii_whitespace() || c == '>').next().unwrap_or(""),
+        };
+        return Some(value.replace("&amp;", "&"));
+    }
+    None
+}
+
+/// The icons a page's HTML declares, like CANDIDATES_SCRIPT does in a live page.
+fn declared_in_html(html: &str, base: &url::Url) -> Declared {
+    let mut links = Vec::new();
+    let mut manifest = None;
+    let lower = html.to_ascii_lowercase();
+    let head_end = lower.find("</head>").unwrap_or(lower.len());
+    let mut from = 0;
+    while let Some(found) = lower[from..head_end].find("<link") {
+        let start = from + found;
+        let end = lower[start..head_end].find('>').map_or(head_end, |offset| start + offset);
+        let tag = &html[start..end];
+        from = end;
+        let (Some(rel), Some(href)) = (attribute(tag, "rel"), attribute(tag, "href")) else { continue };
+        let rel = rel.to_ascii_lowercase();
+        let Ok(href) = base.join(&href) else { continue };
+        if rel.split_whitespace().any(|part| part == "manifest") {
+            manifest = Some(href.to_string());
+        } else if rel.split_whitespace().any(|part| matches!(part, "icon" | "apple-touch-icon" | "apple-touch-icon-precomposed")) {
+            links.push(Candidate {
+                href: href.to_string(),
+                rel,
+                sizes: attribute(tag, "sizes").unwrap_or_default(),
+                r#type: attribute(tag, "type").unwrap_or_default().to_ascii_lowercase(),
+            });
+        }
+    }
+    Declared { links, manifest }
+}
+
+/// An icon for a site that isn't open (bookmarks on the Home page): reads the
+/// site's home page for declared icons, then tries the usual addresses. Like
+/// any favicon request: no cookies; only the bookmarked site is contacted.
+#[tauri::command]
+pub async fn site_icon(url: String) -> Option<String> {
+    let parsed = url::Url::parse(&url).ok().filter(|url| matches!(url.scheme(), "http" | "https"))?;
+    let origin = crate::vault::origin_of(parsed.as_str())?;
+    if let Some(found) = cache().lock().ok()?.get(&origin) {
+        return found.clone();
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let agent = agent();
+        let home = url::Url::parse(&format!("{origin}/")).ok()?;
+        let declared = agent
+            .get(home.as_str())
+            .header("Accept", "text/html")
+            .call()
+            .ok()
+            .and_then(|mut response| response.body_mut().with_config().limit(MAX_BYTES).read_to_vec().ok())
+            .map(|bytes| declared_in_html(&String::from_utf8_lossy(&bytes), &home))
+            .unwrap_or(Declared { links: Vec::new(), manifest: None });
+        let icon = find_best(&origin, declared).or_else(|| fetch_image(&agent, &format!("{origin}/favicon.ico")));
+        if let Ok(mut cache) = cache().lock() {
+            cache.insert(origin, icon.clone());
+        }
+        icon
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 #[derive(Clone, serde::Serialize)]
 struct HighResIcon {
     label: String,
@@ -245,6 +329,22 @@ pub fn refresh(app: AppHandle, webview: Webview, label: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_icons_from_html() {
+        let html = r#"<html><head>
+            <link rel="stylesheet" href="/a.css">
+            <link rel="icon" type="image/svg+xml" href="/icon.svg">
+            <LINK REL='apple-touch-icon' sizes=180x180 href="touch.png?v=1&amp;x=2">
+            <link href="/site.webmanifest" rel="manifest">
+          </head><body><link rel="icon" href="/ignored.png"></body></html>"#;
+        let base = url::Url::parse("https://example.com/").unwrap();
+        let declared = declared_in_html(html, &base);
+        let hrefs: Vec<_> = declared.links.iter().map(|link| link.href.as_str()).collect();
+        assert_eq!(hrefs, ["https://example.com/icon.svg", "https://example.com/touch.png?v=1&x=2"]);
+        assert_eq!(declared.links[1].sizes, "180x180");
+        assert_eq!(declared.manifest.as_deref(), Some("https://example.com/site.webmanifest"));
+    }
 
     #[test]
     fn prefers_large_and_scalable_icons() {

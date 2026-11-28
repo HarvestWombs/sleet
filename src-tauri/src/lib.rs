@@ -64,6 +64,34 @@ struct DownloadPayload {
     phase: &'static str,
 }
 
+/// The keyboard shortcut table pages use (key → action, as JSON), set by the UI
+/// from Settings → Keyboard shortcuts.
+static PAGE_SHORTCUTS: Mutex<String> = Mutex::new(String::new());
+
+/// Sets `window.__sleetShortcuts` in a page (the key script reads it).
+fn shortcuts_script() -> String {
+    let table = PAGE_SHORTCUTS.lock().map(|table| table.clone()).unwrap_or_default();
+    format!("window.__sleetShortcuts = {};", if table.is_empty() { "{}" } else { table.as_str() })
+}
+
+/// New shortcut table: kept for new pages and pushed into the open ones.
+#[tauri::command]
+fn set_shortcuts(app: AppHandle, table: std::collections::HashMap<String, String>) -> Result<(), String> {
+    // Action names are plain words; anything else is dropped.
+    let table: std::collections::HashMap<String, String> = table
+        .into_iter()
+        .filter(|(key, action)| key.len() <= 40 && !action.is_empty() && action.len() <= 40 && action.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'))
+        .collect();
+    *PAGE_SHORTCUTS.lock().map_err(|error| error.to_string())? = serde_json::to_string(&table).map_err(|error| error.to_string())?;
+    let script = shortcuts_script();
+    for (label, webview) in app.webviews() {
+        if label.starts_with(PAGE_PREFIX) {
+            let _ = webview.eval(&script);
+        }
+    }
+    Ok(())
+}
+
 /// Folder chosen in Settings for new downloads. `None` keeps the engine default.
 #[derive(Default)]
 struct DownloadDir(Mutex<Option<PathBuf>>);
@@ -99,45 +127,56 @@ async fn create_browser_view(
     let popup_label = label.clone();
 
     let mut builder = WebviewBuilder::new(label.clone(), WebviewUrl::External(parsed))
+        // The shortcut table as it is now (pages get updates after each load and on change).
+        .initialization_script(&shortcuts_script())
         .initialization_script(
             r#"
               (() => {
                 const send = (command) => { window.location.href = `sleet-command://${command}`; };
                 let altDigits = false;
+                // Same key names as src/lib/shortcuts.ts: "Ctrl+Shift+N", "Alt+S", "F5".
+                const named = { Comma: ',', Period: '.', Slash: '/', Semicolon: ';', Quote: "'", BracketLeft: '[', BracketRight: ']',
+                  Backslash: '\\', Backquote: '`', Minus: '-', Equal: '=', NumpadAdd: 'Plus', NumpadSubtract: '-',
+                  NumpadMultiply: '*', NumpadDivide: '/', NumpadDecimal: '.', ArrowLeft: 'Left', ArrowRight: 'Right',
+                  ArrowUp: 'Up', ArrowDown: 'Down', Escape: 'Esc', Space: 'Space', Tab: 'Tab', Enter: 'Enter',
+                  NumpadEnter: 'Enter', Delete: 'Delete', Backspace: 'Backspace', Insert: 'Insert', Home: 'Home',
+                  End: 'End', PageUp: 'PageUp', PageDown: 'PageDown' };
+                const keyName = (event) => {
+                  const code = event.code || '';
+                  if (/^(Control|Alt|Shift|Meta|OS)(Left|Right)?$/.test(code) || ['Control', 'Alt', 'Shift', 'Meta', 'AltGraph'].includes(event.key)) return null;
+                  let match = /^Key([A-Z])$/.exec(code); if (match) return match[1];
+                  match = /^(?:Digit|Numpad)(\d)$/.exec(code); if (match) return match[1];
+                  if (/^F\d{1,2}$/.test(code)) return code;
+                  if (named[code]) return named[code];
+                  return event.key && event.key.length === 1 ? event.key.toUpperCase() : (event.key || null);
+                };
+                const bindingOf = (event) => {
+                  const name = keyName(event);
+                  if (!name) return null;
+                  return [(event.ctrlKey || event.metaKey) ? 'Ctrl' : '', event.altKey ? 'Alt' : '', event.shiftKey ? 'Shift' : '', name].filter(Boolean).join('+');
+                };
                 document.addEventListener('keydown', (event) => {
-                  if (event.altKey && !event.ctrlKey && !event.metaKey) {
-                    const nav = { ArrowLeft: 'back', ArrowRight: 'forward' }[event.key];
-                    const digit = /^[0-9]$/.test(event.key) ? event.key : null;
-                    if (nav || digit) {
-                      event.preventDefault();
-                      event.stopImmediatePropagation();
-                      if (digit) altDigits = true;
-                      send(nav ?? `tab-digit-${digit}`);
-                      return;
-                    }
-                  }
-                  const plain = !event.ctrlKey && !event.metaKey && !event.altKey;
-                  const fkey = plain && { F5: 'reload', F11: 'fullscreen', F3: event.shiftKey ? 'find-previous' : 'find-next' }[event.key];
-                  if (fkey) {
+                  // Alt+digits pick a tab by number (released Alt commits); Ctrl+1–9 open a pinned site.
+                  if (event.altKey && !event.ctrlKey && !event.metaKey && /^Digit[0-9]$/.test(event.code)) {
                     event.preventDefault();
                     event.stopImmediatePropagation();
-                    send(fkey);
+                    altDigits = true;
+                    send(`tab-digit-${event.code.slice(5)}`);
                     return;
                   }
-                  if (plain && event.key === 'Escape' && document.readyState !== 'complete') { send('stop'); return; }
-                  if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
-                  const commands = {
-                    k: 'palette', l: 'address', t: 'new-tab', n: 'new-window', w: 'close-tab',
-                    y: 'history', j: 'downloads', ',': 'settings',
-                    '=': 'zoom-in', '+': 'zoom-in', '-': 'zoom-out', '0': 'zoom-reset', d: 'bookmark',
-                    f: 'find', g: 'find-next', p: 'print', r: 'reload',
-                    tab: 'next-tab', pagedown: 'next-tab', pageup: 'previous-tab'
-                  };
-                  const shifted = { n: 'new-private-tab', w: 'reopen-tab', t: 'reopen-tab', s: 'toggle-sidebar', tab: 'previous-tab', g: 'find-previous', delete: 'clear-data', r: 'reload' };
-                  const key = event.key.toLowerCase();
-                  const digit = !event.shiftKey && /^[1-9]$/.test(event.key) ? `tab-index-${event.key}` : null;
-                  const command = digit ?? (event.shiftKey && shifted[key] ? shifted[key] : commands[key]);
+                  if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && /^Digit[1-9]$/.test(event.code)) {
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+                    send(`pinned-index-${event.code.slice(5)}`);
+                    return;
+                  }
+                  if (event.key === 'Escape' && !event.ctrlKey && !event.altKey && !event.metaKey && document.readyState !== 'complete') { send('stop'); return; }
+                  // The shortcut table (Settings → Keyboard shortcuts), kept current by Sleet.
+                  const binding = bindingOf(event);
+                  const command = binding && (window.__sleetShortcuts || {})[binding];
                   if (!command) return;
+                  // In a text field, Alt+Left/Right keep moving through the text.
+                  if ((binding === 'Alt+Left' || binding === 'Alt+Right') && event.target && event.target.closest && event.target.closest('input, textarea, [contenteditable]')) return;
                   event.preventDefault();
                   event.stopImmediatePropagation();
                   send(command);
@@ -221,6 +260,8 @@ async fn create_browser_view(
                 serde_json::json!({ "label": label_for_navigation, "loading": matches!(payload.event(), PageLoadEvent::Started) }),
             );
             if matches!(payload.event(), PageLoadEvent::Finished) {
+                // The table this page started with may be older than the current one.
+                let _ = webview.eval(&shortcuts_script());
                 let _ = navigation_app.emit(
                     "sleet-navigation",
                     NavigationPayload {
@@ -777,6 +818,8 @@ pub fn run() {
             windows::move_tabs_to_window,
             windows::list_windows,
             windows::window_at,
+            favicons::site_icon,
+            set_shortcuts,
             set_privacy_options,
             allow_http,
             allow_certificate,

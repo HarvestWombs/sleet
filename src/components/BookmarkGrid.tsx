@@ -108,7 +108,8 @@ export function BookmarkGrid({ bookmarks, expanded, stateOf, onOpen, onToggleFol
         data-bm-id={bookmark.id}
         data-bm-parent={parentId ?? ""}
         data-bm-index={index}
-        title={bookmark.kind === "folder" ? `${bookmark.title} (${bookmark.children?.length ?? 0})` : bookmark.title}
+        title={bookmark.kind === "folder" ? `${bookmark.title} (${bookmark.children?.length ?? 0})` : bookmark.multiTab ? `${bookmark.title}
+Opens a new tab every time` : bookmark.title}
         aria-label={bookmark.title}
         aria-expanded={bookmark.kind === "folder" ? isOpenFolder : undefined}
         onPointerDown={(event) => startDrag(event, bookmark)}
@@ -126,6 +127,7 @@ export function BookmarkGrid({ bookmarks, expanded, stateOf, onOpen, onToggleFol
             )
           : <SiteIcon url={bookmark.url} title={bookmark.title} className="bm-icon" />}
         <i className="bm-indicator" aria-hidden="true" />
+        {bookmark.multiTab && <i className="bm-multi" aria-hidden="true" />}
       </button>
     );
   };
@@ -153,7 +155,7 @@ export function BookmarkGrid({ bookmarks, expanded, stateOf, onOpen, onToggleFol
           ),
         ];
       })}
-      {bookmarks.length === 0 && <p className="bm-empty">Press Ctrl+D or drag a tab here to pin a site</p>}
+      {bookmarks.length === 0 && <p className="bm-empty">Click the star (Ctrl+Shift+D) or drag a tab here to pin a site</p>}
       {drag && dragged && (
         <div className="bm-ghost" style={{ left: drag.x, top: drag.y }} aria-hidden="true">
           {dragged.kind === "folder" ? <FolderOpen size={20} /> : <SiteIcon url={dragged.url} title={dragged.title} className="bm-icon" />}

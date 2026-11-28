@@ -32,7 +32,7 @@ export function BookmarkImportPage({ pending, bookmarks, onImport, onDone }: Boo
     return (
       <div className="settings-card import-result">
         <div className="settings-row">
-          <div className="settings-copy"><strong>{result}</strong><small>They're in the grid at the top of the sidebar.</small></div>
+          <div className="settings-copy"><strong>{result}</strong><small>They're on the Home page.</small></div>
           <div className="settings-control"><button className="settings-button" onClick={onDone}>Done</button></div>
         </div>
       </div>
@@ -50,24 +50,24 @@ export function BookmarkImportPage({ pending, bookmarks, onImport, onDone }: Boo
         </div>
         <div className="settings-row">
           <div className="settings-copy">
-            <strong>Folders</strong>
-            <small>Sleet has one level of folders, so nested folders become “Parent / Child”.</small>
+            <strong>Groups</strong>
+            <small>Each folder becomes a group on the Home page; nested folders become “Parent / Child”.</small>
           </div>
           <div className="settings-control">
             <div className="segmented" role="radiogroup" aria-label="Folders">
-              <button role="radio" aria-checked={mode === "folders"} className={mode === "folders" ? "is-on" : ""} onClick={() => setMode("folders")}>Keep folders</button>
-              <button role="radio" aria-checked={mode === "single"} className={mode === "single" ? "is-on" : ""} onClick={() => setMode("single")}>One folder</button>
+              <button role="radio" aria-checked={mode === "folders"} className={mode === "folders" ? "is-on" : ""} onClick={() => setMode("folders")}>A group per folder</button>
+              <button role="radio" aria-checked={mode === "single"} className={mode === "single" ? "is-on" : ""} onClick={() => setMode("single")}>One group</button>
             </div>
           </div>
         </div>
         {hasGridRoot && mode === "folders" && (
           <div className="settings-row">
             <div className="settings-copy">
-              <strong>Bookmarks bar and favorites in the grid</strong>
-              <small>Put them straight into the grid instead of a folder</small>
+              <strong>Bookmarks bar and favorites in “Bookmarks”</strong>
+              <small>Put them in the main “Bookmarks” group instead of a group of their own</small>
             </div>
             <div className="settings-control">
-              <button className={`toggle ${gridRoots ? "is-on" : ""}`} role="switch" aria-checked={gridRoots} aria-label="Bookmarks bar in the grid" onClick={() => setGridRoots((value) => !value)}><i /></button>
+              <button className={`toggle ${gridRoots ? "is-on" : ""}`} role="switch" aria-checked={gridRoots} aria-label="Bookmarks bar in the Bookmarks group" onClick={() => setGridRoots((value) => !value)}><i /></button>
             </div>
           </div>
         )}
@@ -79,8 +79,8 @@ export function BookmarkImportPage({ pending, bookmarks, onImport, onDone }: Boo
             <strong>{plan.added === 0 ? "Nothing new to add" : `Adds ${plan.added} bookmark${plan.added === 1 ? "" : "s"}`}</strong>
             <small>
               {[
-                loose > 0 ? `${loose} in the grid` : null,
-                plan.folders > 0 ? `${plan.folders} folder${plan.folders === 1 ? "" : "s"}` : null,
+                loose > 0 ? `${loose} in “Bookmarks”` : null,
+                plan.folders > 0 ? `${plan.folders} group${plan.folders === 1 ? "" : "s"}` : null,
                 plan.skipped > 0 ? `${plan.skipped} already in Sleet or repeated, skipped` : null,
                 Object.keys(pending.icons).length > 0 ? `${Object.keys(pending.icons).length} site icons` : null,
               ].filter(Boolean).join(" · ") || "Everything here is already in Sleet."}

@@ -1,6 +1,7 @@
 import { Anchor, ChevronRight, Columns2, Download, FolderOpen, History, List, Moon, Plus, Settings2, VenetianMask, Volume2, VolumeX, X, Frown, PanelLeftClose } from "lucide-react";
 import { type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, useRef, useState } from "react";
 import { BookmarkEditor } from "./BookmarkGrid";
+import { SleetLogo } from "./SleetLogo";
 import { displayHost, isHomeUrl } from "../lib/browser";
 import { SiteIcon } from "./SiteIcon";
 import { DownloadBar, DownloadIcon } from "./DownloadIcon";
@@ -262,7 +263,7 @@ export function TabSidebar(props: TabSidebarProps) {
     >
       <header className="sidebar-header" data-tauri-drag-region>
         <div className="sidebar-header-actions">
-          <button className={`sidebar-action is-brand ${mode === "tabs" ? "is-active" : ""}`} aria-label="Tabs" aria-pressed={mode === "tabs"} title="Tabs" onClick={() => onModeChange("tabs")}><span className="brand-mark">S</span></button>
+          <button className={`sidebar-action is-brand ${mode === "tabs" ? "is-active" : ""}`} aria-label="Tabs" aria-pressed={mode === "tabs"} title="Tabs" onClick={() => onModeChange("tabs")}><SleetLogo size={24} className="brand-logo" /></button>
           <button className={`sidebar-action ${mode === "history" ? "is-active" : ""}`} aria-label="History" aria-pressed={mode === "history"} title="History (Ctrl+Y opens the full page)" onClick={() => toggleMode("history")}><History size={19} /></button>
           <button className={`sidebar-action ${mode === "downloads" ? "is-active" : ""}`} aria-label="Downloads" aria-pressed={mode === "downloads"} title="Downloads (Ctrl+J opens the full page)" onClick={() => toggleMode("downloads")}><DownloadIcon downloads={downloads} /></button>
         </div>
@@ -277,7 +278,7 @@ export function TabSidebar(props: TabSidebarProps) {
             {/* data-bookmark-grid: a tab dropped on the header is bookmarked even while it's collapsed. */}
             <button className="sidebar-section-header" data-bookmark-grid aria-expanded={!props.bookmarksCollapsed} onClick={props.onToggleBookmarks}>
               <ChevronRight size={15} className="sidebar-section-chevron" />
-              <span>Bookmarks</span>
+              <span>Pinned</span>
               {props.bookmarkCount !== undefined && <small>{props.bookmarkCount}</small>}
             </button>
             {!props.bookmarksCollapsed && props.bookmarks}

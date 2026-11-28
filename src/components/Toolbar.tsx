@@ -1,5 +1,5 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ArrowLeft, ArrowRight, Info, LockKeyhole, LockKeyholeOpen, Minus, MoreHorizontal, RotateCw, KeyRound, Search, ShieldAlert, Square, Star, VenetianMask, X, PanelLeftOpen } from "lucide-react";
+import { ArrowLeft, ArrowRight, Bookmark as BookmarkIcon, Info, LockKeyhole, LockKeyholeOpen, Minus, RotateCw, KeyRound, Search, ShieldAlert, Square, Star, VenetianMask, X, PanelLeftOpen } from "lucide-react";
 import { type FormEvent, type KeyboardEvent, useEffect, useState } from "react";
 import { isHomeUrl, simplifyUrl, siteSecurity } from "../lib/browser";
 import type { Suggestion } from "../lib/suggest";
@@ -8,6 +8,7 @@ import { isTauri } from "../native/browserEngine";
 import { SuggestionList } from "./SuggestionList";
 import type { BrowserTab, DownloadItem } from "../types";
 import { DownloadIcon } from "./DownloadIcon";
+import { shortcutLabel, withShortcut } from "../lib/shortcuts";
 import { IconButton } from "./IconButton";
 
 interface ToolbarProps {
@@ -16,9 +17,12 @@ interface ToolbarProps {
   /** Tab zoom when it differs from the default; shows a reset pill. */
   zoom?: number;
   onResetZoom: () => void;
-  /** Whether the current page is bookmarked (undefined hides the star, e.g. on Home). */
+  /** Whether the current page is pinned to the sidebar (undefined hides the star, e.g. on Home). */
   bookmarked?: boolean;
   onToggleBookmark: () => void;
+  /** Whether the page is in the Home page's bookmarks (undefined hides the button). */
+  inBookmarks?: boolean;
+  onToggleInBookmarks: () => void;
   /** Saved logins for this page: count, or locked. Undefined hides the key. */
   logins?: { count: number; locked: boolean };
   onOpenLogins: () => void;
@@ -29,7 +33,6 @@ interface ToolbarProps {
   /** There is somewhere to go back / forward to (otherwise the button is greyed out). */
   canGoBack?: boolean;
   canGoForward?: boolean;
-  onMore: () => void;
   suggestions: Suggestion[];
   /** Highlighted suggestion; -1 for none. */
   selectedSuggestion: number;
@@ -48,7 +51,7 @@ interface ToolbarProps {
   onOpenDownloads?: () => void;
 }
 
-export function Toolbar({ tab, fullUrls, zoom, onResetZoom, bookmarked, onToggleBookmark, logins, onOpenLogins, onNavigate, onAction, onMore, suggestions, selectedSuggestion, onAddressInput, onSelectSuggestion, onPickSuggestion, onOpenSiteInfo, commandMode = false, loading = false, canGoBack = true, canGoForward = true, sidebarHidden = false, onShowSidebar, downloads = [], onOpenDownloads }: ToolbarProps) {
+export function Toolbar({ tab, fullUrls, zoom, onResetZoom, bookmarked, onToggleBookmark, inBookmarks, onToggleInBookmarks, logins, onOpenLogins, onNavigate, onAction, suggestions, selectedSuggestion, onAddressInput, onSelectSuggestion, onPickSuggestion, onOpenSiteInfo, commandMode = false, loading = false, canGoBack = true, canGoForward = true, sidebarHidden = false, onShowSidebar, downloads = [], onOpenDownloads }: ToolbarProps) {
   const tabUrl = tab && !isHomeUrl(tab.url) ? tab.url : "";
   const [address, setAddress] = useState(tabUrl);
   const [focused, setFocused] = useState(false);
@@ -91,13 +94,13 @@ export function Toolbar({ tab, fullUrls, zoom, onResetZoom, bookmarked, onToggle
   return (
     <header className="toolbar" data-tauri-drag-region>
       <div className="toolbar-nav" data-tauri-drag-region>
-        {sidebarHidden && <IconButton label="Show sidebar (Ctrl+Shift+S)" onClick={onShowSidebar}><PanelLeftOpen size={21} /></IconButton>}
+        {sidebarHidden && <IconButton label={withShortcut("Show sidebar", "toggle-sidebar")} onClick={onShowSidebar}><PanelLeftOpen size={21} /></IconButton>}
         {sidebarHidden && downloads.some((item) => item.status === "active") && <IconButton label="Downloads" onClick={onOpenDownloads}><DownloadIcon downloads={downloads} size={21} /></IconButton>}
-        <IconButton label="Back (Alt+Left)" disabled={!canGoBack} onClick={() => onAction("back")}><ArrowLeft size={23} /></IconButton>
-        <IconButton label="Forward (Alt+Right)" disabled={!canGoForward} onClick={() => onAction("forward")}><ArrowRight size={23} /></IconButton>
+        <IconButton label={withShortcut("Back", "back")} disabled={!canGoBack} onClick={() => onAction("back")}><ArrowLeft size={23} /></IconButton>
+        <IconButton label={withShortcut("Forward", "forward")} disabled={!canGoForward} onClick={() => onAction("forward")}><ArrowRight size={23} /></IconButton>
         {loading
           ? <IconButton label="Stop loading (Esc)" onClick={() => onAction("stop")}><X size={23} /></IconButton>
-          : <IconButton label="Reload (Ctrl+R)" onClick={() => onAction("reload")}><RotateCw size={21} /></IconButton>}
+          : <IconButton label={withShortcut("Reload", "reload")} onClick={() => onAction("reload")}><RotateCw size={21} /></IconButton>}
       </div>
       <form className="address" onSubmit={submit} data-tauri-drag-region>
         {tab?.private && <span className="address-private" title="Private tab"><VenetianMask size={16} /></span>}
@@ -130,13 +133,18 @@ export function Toolbar({ tab, fullUrls, zoom, onResetZoom, bookmarked, onToggle
             <KeyRound size={18} />{!logins.locked && logins.count > 1 && <em>{logins.count}</em>}
           </button>
         )}
+        {inBookmarks !== undefined && (
+          <button type="button" className={`address-star address-bookmark ${inBookmarks ? "is-on" : ""}`} onMouseDown={(event) => event.preventDefault()} onClick={onToggleInBookmarks} title={withShortcut(inBookmarks ? "Remove from bookmarks" : "Add to bookmarks", "bookmark")} aria-pressed={inBookmarks}>
+            <BookmarkIcon size={18} fill={inBookmarks ? "currentColor" : "none"} />
+          </button>
+        )}
         {bookmarked !== undefined && (
-          <button type="button" className={`address-star ${bookmarked ? "is-on" : ""}`} onMouseDown={(event) => event.preventDefault()} onClick={onToggleBookmark} title={bookmarked ? "Remove bookmark (Ctrl+D)" : "Bookmark this page (Ctrl+D)"} aria-pressed={bookmarked}>
+          <button type="button" className={`address-star ${bookmarked ? "is-on" : ""}`} onMouseDown={(event) => event.preventDefault()} onClick={onToggleBookmark} title={withShortcut(bookmarked ? "Unpin from the sidebar" : "Pin to the sidebar", "pin")} aria-pressed={bookmarked}>
             <Star size={18} fill={bookmarked ? "currentColor" : "none"} />
           </button>
         )}
         {zoom !== undefined && <button type="button" className="zoom-pill" onClick={onResetZoom} title="Reset zoom (Ctrl+0)">{Math.round(zoom * 100)}%</button>}
-        <span className="address-shortcut">Ctrl L</span>
+        <span className="address-shortcut">{shortcutLabel("address")}</span>
         {!isTauri() && (focused || commandMode) && (
           <div className="suggestions-anchor">
             <SuggestionList items={suggestions} selected={selectedSuggestion} onPick={onPickSuggestion} onHover={onSelectSuggestion} />
@@ -144,7 +152,6 @@ export function Toolbar({ tab, fullUrls, zoom, onResetZoom, bookmarked, onToggle
         )}
       </form>
       <div className="toolbar-actions" data-tauri-drag-region>
-        <IconButton label="Command palette (Ctrl+K)" onClick={onMore}><MoreHorizontal size={24} /></IconButton>
         <div className="window-controls">
           <button aria-label="Minimize" onClick={() => windowAction("minimize")}><Minus size={18} /></button>
           <button aria-label="Maximize" onClick={() => windowAction("maximize")}><Square size={14} /></button>

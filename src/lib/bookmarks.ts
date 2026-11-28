@@ -12,6 +12,8 @@ export interface Bookmark {
   children?: Bookmark[];
   /** Folder tint. */
   color?: string;
+  /** Links only: every click opens a new tab, instead of going back to the tab it opened before. */
+  multiTab?: boolean;
 }
 
 export const FOLDER_COLORS = ["#8e91ff", "#5fb3ff", "#4fc79a", "#f2b84b", "#f07c6c", "#c08bff"];
@@ -80,7 +82,7 @@ export function removeBookmark(tree: Bookmark[], id: string): Bookmark[] {
   return tidy(without(tree, id)[0]);
 }
 
-export function updateBookmark(tree: Bookmark[], id: string, patch: Partial<Pick<Bookmark, "title" | "url" | "color">>): Bookmark[] {
+export function updateBookmark(tree: Bookmark[], id: string, patch: Partial<Pick<Bookmark, "title" | "url" | "color" | "multiTab">>): Bookmark[] {
   return tree.map((node) => {
     if (node.id === id) return { ...node, ...patch };
     if (!node.children?.some((child) => child.id === id)) return node;
